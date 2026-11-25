@@ -134,31 +134,53 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     };
     const persist = () => saveDrawings(coinRef.current, draw.drawings);
 
-    // Clicks: place drawings when a tool is active, select a drawing under the cursor,
-    // otherwise stage an order at that price.
-    chart.subscribeClick((p) => {
-      if (!p.point) return;
+    // Placing drawing points uses native pointer events: lightweight-charts drops the second of two
+    // quick clicks (it treats them as a double-click), which lost the end point of trend lines and fibs.
+    let placedAt = 0;
+    let down: { x: number; y: number } | null = null;
+    const local = (e: PointerEvent) => {
+      const r = host.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    };
+    const onDown = (e: PointerEvent) => {
+      down = toolRef.current && e.button === 0 ? local(e) : null;
+    };
+    const onUp = (e: PointerEvent) => {
       const kind = toolRef.current;
-      if (kind) {
-        const pt = toPoint(p.point.x, p.point.y);
-        if (!pt) return;
-        if (!draw.draft) {
-          const d: Drawing = { id: crypto.randomUUID(), kind, a: pt, b: pt, color: '#f5c542' };
-          if (DRAWING_INFO[kind].points === 1) {
-            draw.drawings.push(d);
-            persist();
-            toolDoneRef.current();
-          } else draw.draft = d;
-        } else {
-          draw.draft.b = pt;
-          draw.drawings.push(draw.draft);
-          draw.draft = null;
+      const start = down;
+      down = null;
+      if (!kind || !start) return;
+      const { x, y } = local(e);
+      // Ignore drags (panning) and clicks outside the main price pane.
+      if (Math.hypot(x - start.x, y - start.y) > 5) return;
+      if (x < 0 || x > chart.timeScale().width() || y < 0 || y > chart.panes()[0].getHeight()) return;
+      const pt = toPoint(x, y);
+      if (!pt) return;
+      if (draw.draft && draw.draft.kind !== kind) draw.draft = null;
+      placedAt = performance.now();
+      if (!draw.draft) {
+        const d: Drawing = { id: crypto.randomUUID(), kind, a: pt, b: pt, color: '#f5c542' };
+        if (DRAWING_INFO[kind].points === 1) {
+          draw.drawings.push(d);
           persist();
           toolDoneRef.current();
-        }
-        draw.update();
-        return;
+        } else draw.draft = d;
+      } else {
+        draw.draft.b = pt;
+        draw.drawings.push(draw.draft);
+        draw.draft = null;
+        persist();
+        toolDoneRef.current();
       }
+      draw.update();
+    };
+    host.addEventListener('pointerdown', onDown);
+    host.addEventListener('pointerup', onUp);
+
+    // With no tool: select a drawing under the cursor, otherwise stage an order at that price.
+    chart.subscribeClick((p) => {
+      // The click that finished a drawing must not also select something or stage an order.
+      if (!p.point || toolRef.current || performance.now() - placedAt < 400) return;
       const hit = draw.hit(p.point.x, p.point.y);
       draw.selected = hit;
       draw.update();
@@ -202,6 +224,8 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     disposedRef.current = false;
     return () => {
       window.removeEventListener('keydown', onKey);
+      host.removeEventListener('pointerdown', onDown);
+      host.removeEventListener('pointerup', onUp);
       indSeriesRef.current.clear();
       disposedRef.current = true;
       // React runs the other effects' cleanups after this one, and some of them touch series
@@ -455,10 +479,10 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     draw.update();
   }, [clearDrawings]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Leaving a tool half-placed cancels the draft.
+  // Switching or leaving a tool cancels a half-placed drawing.
   useEffect(() => {
     const draw = drawRef.current;
-    if (draw && !tool && draw.draft) {
+    if (draw?.draft && draw.draft.kind !== tool) {
       draw.draft = null;
       draw.update();
     }
