@@ -2,8 +2,8 @@
 // Docs: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
 // Request and response shapes mirror the official Python SDK (hyperliquid/info.py).
 
-export const API_URL = 'https://api.hyperliquid.xyz';
-export const WS_URL = 'wss://api.hyperliquid.xyz/ws';
+import { API_URL } from './network';
+export { API_URL, WS_URL } from './network';
 
 export async function info<T>(body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${API_URL}/info`, {
@@ -211,8 +211,25 @@ export interface ClearinghouseState {
   time: number;
 }
 
-export function fetchClearinghouse(user: string, signal?: AbortSignal) {
-  return info<ClearinghouseState>({ type: 'clearinghouseState', user }, signal);
+export function fetchClearinghouse(user: string, signal?: AbortSignal, dex = '') {
+  return info<ClearinghouseState>({ type: 'clearinghouseState', user, dex }, signal);
+}
+
+export interface OpenOrder {
+  coin: string;
+  side: 'B' | 'A';
+  limitPx: string;
+  sz: string;
+  origSz: string;
+  oid: number;
+  timestamp: number;
+  orderType: string;
+  reduceOnly: boolean;
+  tif: string | null;
+}
+
+export function fetchOpenOrders(user: string, dex = '', signal?: AbortSignal) {
+  return info<OpenOrder[]>({ type: 'frontendOpenOrders', user, dex }, signal);
 }
 
 export const isAddress = (s: string) => /^0x[0-9a-fA-F]{40}$/.test(s.trim());

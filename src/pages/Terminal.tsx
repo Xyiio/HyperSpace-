@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { fetchFills, isAddress, type Fill, type Interval, type Market } from '../hl/api';
+import { fetchFills, isAddress, type Fill, type Interval, type Market, type OpenOrder } from '../hl/api';
 import { ChartPanel } from '../components/ChartPanel';
 import { BookLadder } from '../components/BookLadder';
 import { TradeTape } from '../components/TradeTape';
 import { OrderTicket } from '../components/OrderTicket';
+import { AccountPanel } from '../components/AccountPanel';
 import { MarketBar } from '../components/MarketBar';
 import { shortAddr } from '../hl/stats';
 
@@ -38,6 +39,7 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
   const [wallet, setWallet] = useState(overlay ?? '');
   const [fills, setFills] = useState<Fill[] | null>(null);
   const [fillsMsg, setFillsMsg] = useState('');
+  const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
 
   useEffect(() => {
     setBigTrade(defaultBigTrade(market));
@@ -113,12 +115,14 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
             heatmap={heatmap}
             bigTradeUsd={bigTrade}
             walletFills={fills}
+            openOrders={openOrders}
             onPricePick={setPrice}
           />
           <p className="legend">
             <span className="sw bid" /> resting bids <span className="sw ask" /> resting asks, brighter = more size · bubbles = trades ≥ ${bigTrade.toLocaleString()} ·
             the heatmap builds while this tab is open · click the chart to stage an order
           </p>
+          <AccountPanel market={market} markets={markets} onOpenOrders={setOpenOrders} onMarket={(c) => go(c)} />
         </div>
         <div className="side-col">
           <BookLadder market={market} nSigFigs={nSigFigs} onPricePick={setPrice} />

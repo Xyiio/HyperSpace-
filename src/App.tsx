@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { fetchMarkets, isAddress, type Market } from './hl/api';
 import { Terminal } from './pages/Terminal';
 import { Wallet } from './pages/Wallet';
+import { WalletProvider } from './wallet/WalletContext';
+import { NetworkSwitch, WalletButton } from './components/WalletButton';
+import { NETWORK } from './hl/network';
 
 type Route = { page: 'trade'; coin: string; wallet: string | null } | { page: 'wallet'; address: string | null };
 
@@ -46,6 +49,7 @@ export default function App() {
   };
 
   return (
+    <WalletProvider>
     <div className="app">
       <header className="top">
         <a className="brand" href="#/trade/BTC">
@@ -59,7 +63,9 @@ export default function App() {
             Verified PnL
           </a>
         </nav>
-        <span className="muted small">Live data from Hyperliquid mainnet · no keys, no backend</span>
+        <span className="muted small top-note">Live data from Hyperliquid {NETWORK}</span>
+        <NetworkSwitch />
+        <WalletButton />
       </header>
       {error && <div className="error">{error}</div>}
       {route.page === 'wallet' ? (
@@ -70,5 +76,6 @@ export default function App() {
         !error && <div className="panel-empty">Loading markets…</div>
       )}
     </div>
+    </WalletProvider>
   );
 }

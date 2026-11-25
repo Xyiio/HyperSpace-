@@ -9,11 +9,15 @@ A Hyperliquid-native charting and trading terminal. It reads order flow straight
 - **Order-book heatmap** drawn behind the candles from `l2Book` snapshots, one column per second. Hyperliquid only serves the current book, so the heatmap builds while the tab is open. Grouping (tick, 5/4/3 significant figures) is adjustable.
 - **Large-trade bubbles** on the chart and a trade tape that shows the taker's wallet. Click any wallet to open its verified PnL.
 - **Book ladder.** Click a level, or anywhere on the chart, to stage an order at that price.
-- **Order ticket** that builds the exact Hyperliquid order action, including the builder code (`builder: {b, f}`). Wallet signing ships in phase 1, so the submit button is disabled for now.
+- **Wallet connection and trading (phase 1).** Connect any browser wallet (MetaMask, Rabby, Coinbase Wallet and others via EIP-6963). "Enable trading" asks the wallet for two one-time signatures: `approveAgent` for a trading key generated and kept in this browser, and `approveBuilderFee` when a builder address is configured. After that, limit and market orders (IOC with 1% slippage cap), reduce-only, post-only, cancels and "close at market" are signed locally by the agent key, with no wallet pop-up per order. Mainnet orders need a second confirming click. The agent key can trade but cannot withdraw or transfer funds.
+- **Account panel**: balance, positions with liquidation price, open orders with cancel, for the current market's venue. Open orders show as price lines on the chart.
+- **Mainnet / testnet switch** in the header.
 - **Verified PnL** for any address: period PnL, account value, max drawdown and volume from `portfolio`; open positions with liquidation prices from `clearinghouseState`; win rate, fees and per-coin realized PnL from the most recent 2,000 `userFills`.
 - **Wallet overlay**: plot any wallet's real fills on the chart (`#/trade/BTC?wallet=0x…`).
 
-No backend and no API keys: the browser talks to `https://api.hyperliquid.xyz` and `wss://api.hyperliquid.xyz/ws` directly.
+No backend and no API keys: the browser talks to `https://api.hyperliquid.xyz` and `wss://api.hyperliquid.xyz/ws` (or the testnet equivalents) directly.
+
+**Security note:** the agent key is stored in the browser's localStorage for this site. Anyone who can run script on the page could trade with it (not withdraw). Keep the app free of third-party scripts, and revoke the agent on Hyperliquid (API page) if a browser is compromised.
 
 ## Run it
 
@@ -42,12 +46,14 @@ src/hl/order.ts       Order action + builder code construction
 src/pages/            Terminal (chart) and Wallet (verified PnL)
 src/components/       Chart, book ladder, trade tape, order ticket, market bar
 scripts/e2e-mock.cjs  Playwright run against a simulated Hyperliquid feed
+scripts/e2e-wallet.mjs Playwright run of connect → enable trading → order → cancel with a simulated wallet
+src/wallet/           Wallet discovery, connection, agent approval, order signing (@nktkas/hyperliquid + viem)
 ```
 
 ## Roadmap
 
 0. Order-flow MVP (this code)
-1. Trade from the chart: wallet connect, in-browser agent key, signed orders with our builder code, testnet then mainnet
+1. Trade from the chart: wallet connect, in-browser agent key, signed orders with our builder code (built; needs a funded real-wallet test)
 2. Proof layer: wallet indexer, liquidation map, chartist profiles, trade ideas stamped with on-chain positions
 3. Script marketplace: sandboxed indicator language, paid scripts, USDC author payouts
 4. HYPERSPACE token: HIP-1 spot token on Hyperliquid tied to fees and marketplace payouts (design only; nothing is deployed without the owner's sign-off)

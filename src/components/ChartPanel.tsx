@@ -13,7 +13,7 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import { fetchCandles, INTERVAL_MS, type Fill, type Interval, type L2Book, type Market, type RawCandle, type Trade } from '../hl/api';
+import { fetchCandles, INTERVAL_MS, type Fill, type OpenOrder, type Interval, type L2Book, type Market, type RawCandle, type Trade } from '../hl/api';
 import { hlSocket } from '../hl/ws';
 import { HeatmapPrimitive, TimeMapper, TradeBubblesPrimitive } from '../hl/primitives';
 import { bookToSnapshot, priceDecimals } from '../hl/stats';
@@ -29,6 +29,7 @@ interface Props {
   heatmap: boolean;
   bigTradeUsd: number;
   walletFills: Fill[] | null;
+  openOrders?: OpenOrder[];
   onPricePick: (px: number) => void;
 }
 
@@ -46,7 +47,7 @@ const toVol = (c: RawCandle) => ({
   color: Number(c.c) >= Number(c.o) ? 'rgba(52,211,153,0.35)' : 'rgba(248,113,113,0.35)',
 });
 
-export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, walletFills, onPricePick }: Props) {
+export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, walletFills, openOrders, onPricePick }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -214,6 +215,25 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
       });
     markers.setMarkers(list);
   }, [walletFills, market.name, interval]);
+
+  // The connected wallet's resting orders as price lines.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    const lines = (openOrders ?? [])
+      .filter((o) => o.coin === market.name)
+      .map((o) =>
+        series.createPriceLine({
+          price: Number(o.limitPx),
+          color: o.side === 'B' ? '#34d399' : '#f87171',
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: `${o.side === 'B' ? 'Buy' : 'Sell'} ${o.sz}`,
+        }),
+      );
+    return () => lines.forEach((l) => series.removePriceLine(l));
+  }, [openOrders, market.name]);
 
   return (
     <div className="chart-wrap">

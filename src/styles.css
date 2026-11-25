@@ -37,7 +37,7 @@ a { color: var(--accent); }
 .top nav { display: flex; gap: 4px; }
 .top nav a { color: var(--muted); text-decoration: none; padding: 4px 10px; border-radius: 6px; }
 .top nav a.on { color: var(--text); background: #121a23; }
-.top .muted { margin-left: auto; }
+.top .top-note { margin-left: auto; }
 
 .terminal { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .market-bar { display: flex; align-items: center; gap: 22px; padding: 8px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; font-family: var(--mono); }
@@ -148,3 +148,20 @@ th:first-child, td:first-child { text-align: left; }
 .picker { display: flex; gap: 6px; align-items: center; }
 .coin-search { width: 170px; }
 .badge { font-family: system-ui, sans-serif; font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 1px 8px; }
+button.primary { background: rgba(38, 198, 218, 0.15); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.network { font-size: 12px; padding: 3px 6px; }
+.network.testnet { border-color: var(--warn); color: var(--warn); }
+.wallet-btn { position: relative; }
+.wallet-btn > button { display: inline-flex; gap: 6px; align-items: center; font-family: var(--mono); }
+.wallet-btn .menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 260px; background: #0f151c; border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+.wallet-btn .menu.error { color: #fca5a5; border-color: #5c2328; }
+.wallet-choice { display: flex; gap: 8px; align-items: center; text-align: left; }
+.mono { font-family: var(--mono); word-break: break-all; }
+.small-seg button { padding: 3px 8px; font-size: 12px; }
+.hint.ok { color: var(--up); }
+.submit.confirm { outline: 2px solid var(--warn); }
+.ticket-head .badge { margin-left: 8px; color: var(--warn); border-color: var(--warn); }
+.account { border-top: 1px solid var(--line); max-height: 240px; overflow: auto; }
+.account-head { display: flex; gap: 14px; align-items: center; padding: 6px 12px; flex-wrap: wrap; }
+.account .pad { padding: 8px 12px; }
+.account table { font-size: 11.5px; }
