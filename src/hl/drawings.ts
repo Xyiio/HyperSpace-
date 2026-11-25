@@ -136,6 +136,10 @@ export class DrawingsPrimitive extends BasePrimitive {
           ctx.lineTo(x2, y2);
           ctx.stroke();
           ctx.setLineDash([]);
+          // When the levels are packed tightly, label only the ends so the text stays readable.
+          const yA = this.y(d.a.p);
+          const yB = this.y(d.b.p);
+          const tight = yA !== null && yB !== null && Math.abs(yA - yB) < 90;
           for (const lv of FIB_LEVELS) {
             const price = d.b.p + (d.a.p - d.b.p) * lv;
             const y = this.y(price);
@@ -145,7 +149,7 @@ export class DrawingsPrimitive extends BasePrimitive {
             ctx.moveTo(left, y);
             ctx.lineTo(right, y);
             ctx.stroke();
-            ctx.fillText(`${lv} (${price.toFixed(this.decimals)})`, left + 4, y - 3);
+            if (!tight || lv === 0 || lv === 1) ctx.fillText(`${lv} (${price.toFixed(this.decimals)})`, left + 4, y - 3);
           }
           ctx.globalAlpha = 1;
         }
