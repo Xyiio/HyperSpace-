@@ -7,8 +7,9 @@ import { OrderTicket } from '../components/OrderTicket';
 import { AccountPanel } from '../components/AccountPanel';
 import { ChartTools, useIndicators } from '../components/ChartTools';
 import type { DrawingKind } from '../hl/drawings';
+import type { LiqStats } from '../hl/liqmap';
 import { MarketBar } from '../components/MarketBar';
-import { shortAddr } from '../hl/stats';
+import { fmtCompact, shortAddr } from '../hl/stats';
 
 const GROUPINGS: { label: string; value: number | null }[] = [
   { label: 'Tick', value: null },
@@ -45,6 +46,8 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
   const [indicators, setIndicators] = useIndicators();
   const [tool, setTool] = useState<DrawingKind | null>(null);
   const [clearDrawings, setClearDrawings] = useState(0);
+  const [liqMap, setLiqMap] = useState(false);
+  const [liqStats, setLiqStats] = useState<LiqStats | null>(null);
 
   useEffect(() => {
     setBigTrade(defaultBigTrade(market));
@@ -79,6 +82,9 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
         <label className="check">
           <input type="checkbox" checked={heatmap} onChange={(e) => setHeatmap(e.target.checked)} /> Book heatmap
         </label>
+        <label className="check" title="Estimated from wallets seen trading this market since you opened it">
+          <input type="checkbox" checked={liqMap} onChange={(e) => setLiqMap(e.target.checked)} /> Liquidation map
+        </label>
         <label>
           Book grouping
           <select value={String(nSigFigs)} onChange={(e) => setNSigFigs(e.target.value === 'null' ? null : Number(e.target.value))}>
@@ -110,6 +116,28 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
           )}
         </form>
         {fillsMsg && <span className="muted">{fillsMsg}</span>}
+        {liqStats && (
+          <span className="muted small">
+            Liq map: {liqStats.positions} positions from {liqStats.scanned} of {liqStats.wallets} wallets ·{' '}
+            <span className="down">longs {fmtCompact(liqStats.longs)}</span> · <span className="up">shorts {fmtCompact(liqStats.shorts)}</span>
+            {liqStats.below && (
+              <>
+                {' '}· biggest long cluster{' '}
+                <button className="link" onClick={() => setPrice(liqStats.below!.px)}>
+                  {liqStats.below.px} ({liqStats.below.pct.toFixed(1)}%, {fmtCompact(liqStats.below.usd)})
+                </button>
+              </>
+            )}
+            {liqStats.above && (
+              <>
+                {' '}· biggest short cluster{' '}
+                <button className="link" onClick={() => setPrice(liqStats.above!.px)}>
+                  {liqStats.above.px} (+{liqStats.above.pct.toFixed(1)}%, {fmtCompact(liqStats.above.usd)})
+                </button>
+              </>
+            )}
+          </span>
+        )}
       </div>
       <div className="workspace">
         <div className="main-col">
@@ -126,6 +154,8 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
             tool={tool}
             onToolDone={() => setTool(null)}
             clearDrawings={clearDrawings}
+            liqMap={liqMap}
+            onLiqStats={setLiqStats}
             onPricePick={setPrice}
           />
           <p className="legend">

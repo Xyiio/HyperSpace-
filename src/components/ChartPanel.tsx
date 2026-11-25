@@ -19,6 +19,7 @@ import { hlSocket } from '../hl/ws';
 import { HeatmapPrimitive, TimeMapper, TradeBubblesPrimitive } from '../hl/primitives';
 import { bookToSnapshot, priceDecimals } from '../hl/stats';
 import { bollinger, ema, macd, rsi, sma, vwap, type Candle, type IndicatorConfig } from '../hl/indicators';
+import { LiquidationPrimitive, LiquidationScanner, bucketLiquidations, niceStep, type LiqStats } from '../hl/liqmap';
 import { DRAWING_INFO, DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingKind } from '../hl/drawings';
 
 const MAX_SNAPSHOTS = 7200; // ~2h at one column per second
@@ -37,6 +38,8 @@ interface Props {
   tool: DrawingKind | null;
   onToolDone: () => void;
   clearDrawings: number;
+  liqMap: boolean;
+  onLiqStats: (s: LiqStats | null) => void;
   onPricePick: (px: number) => void;
 }
 
@@ -56,7 +59,7 @@ const toVol = (c: RawCandle) => ({
   color: Number(c.c) >= Number(c.o) ? 'rgba(52,211,153,0.35)' : 'rgba(248,113,113,0.35)',
 });
 
-export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, walletFills, openOrders, indicators, tool, onToolDone, clearDrawings, onPricePick }: Props) {
+export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, walletFills, openOrders, indicators, tool, onToolDone, clearDrawings, liqMap, onLiqStats, onPricePick }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -79,6 +82,9 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
   const coinRef = useRef(market.name);
   coinRef.current = market.name;
   const recalcRef = useRef<() => void>(() => {});
+  const liqRef = useRef<LiquidationPrimitive | null>(null);
+  const liqStatsRef = useRef(onLiqStats);
+  liqStatsRef.current = onLiqStats;
   const [status, setStatus] = useState<string>('Loading candles…');
 
   // Create the chart once.
@@ -114,6 +120,9 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     markersRef.current = createSeriesMarkers(series, []);
     const draw = new DrawingsPrimitive(mapperRef.current);
     series.attachPrimitive(draw);
+    const liq = new LiquidationPrimitive(mapperRef.current);
+    series.attachPrimitive(liq);
+    liqRef.current = liq;
 
     const toPoint = (x: number, y: number) => {
       const l = chart.timeScale().coordinateToLogical(x);
@@ -364,6 +373,50 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
       }
     }
   };
+
+  // Liquidation map: scan wallets seen trading this market while the toggle is on.
+  useEffect(() => {
+    const prim = liqRef.current;
+    if (!prim) return;
+    prim.enabled = liqMap;
+    prim.buckets = [];
+    prim.update();
+    if (!liqMap) {
+      liqStatsRef.current(null);
+      return;
+    }
+    prim.step = niceStep(Number(market.ctx.markPx));
+    let pending = false;
+    const scanner = new LiquidationScanner(market.name, market.dex, () => {
+      if (pending) return;
+      pending = true;
+      window.setTimeout(() => {
+        pending = false;
+        prim.buckets = bucketLiquidations(scanner.positions.values(), prim.step);
+        prim.update();
+        let longs = 0;
+        let shorts = 0;
+        scanner.positions.forEach((p) => (p.szi > 0 ? (longs += p.notional) : (shorts += p.notional)));
+        // Largest cluster within 10% on each side of the last close.
+        const last = candlesRef.current.at(-1)?.c ?? Number(market.ctx.markPx);
+        const near = prim.buckets.filter((b) => Math.abs(b.px - last) / last <= 0.1);
+        const below = near.filter((b) => b.px < last).sort((a, b) => b.longs - a.longs)[0];
+        const above = near.filter((b) => b.px > last).sort((a, b) => b.shorts - a.shorts)[0];
+        liqStatsRef.current({
+          wallets: scanner.walletsSeen,
+          scanned: scanner.scanned,
+          positions: scanner.positions.size,
+          longs,
+          shorts,
+          below: below?.longs ? { px: below.px, usd: below.longs, pct: ((below.px - last) / last) * 100 } : null,
+          above: above?.shorts ? { px: above.px, usd: above.shorts, pct: ((above.px - last) / last) * 100 } : null,
+        });
+      }, 500);
+    });
+    scanner.start();
+    liqStatsRef.current({ wallets: 0, scanned: 0, positions: 0, longs: 0, shorts: 0, below: null, above: null });
+    return () => scanner.stop();
+  }, [market.name, liqMap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Drawings: load per market, keep price labels at the market's precision.
   useEffect(() => {

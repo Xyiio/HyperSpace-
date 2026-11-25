@@ -12,6 +12,7 @@ A Hyperliquid-native charting and trading terminal. It reads order flow straight
 - **Wallet connection and trading (phase 1).** Connect any browser wallet (MetaMask, Rabby, Coinbase Wallet and others via EIP-6963). "Enable trading" asks the wallet for two one-time signatures: `approveAgent` for a trading key generated and kept in this browser, and `approveBuilderFee` when a builder address is configured. After that, limit and market orders (IOC with 1% slippage cap), reduce-only, post-only, cancels and "close at market" are signed locally by the agent key, with no wallet pop-up per order. Mainnet orders need a second confirming click. The agent key can trade but cannot withdraw or transfer funds.
 - **Indicators**: SMA, EMA, Bollinger Bands, daily VWAP on the price pane; RSI and MACD in their own panes. Lengths are editable and the set is remembered per browser.
 - **Drawing tools**: trend line (T), horizontal line (H), rectangle (R), Fibonacci retracement (F). Drawings are saved per market; click one to select it and press Delete to remove it.
+- **Liquidation map (estimate)**: wallets are discovered from the live trade stream and their `clearinghouseState` is read (about 2 per second, biggest traders first) to place long and short liquidation levels as bars on the right of the chart. The toolbar shows coverage and the biggest cluster within 10% on each side. It only covers wallets seen trading since the page opened.
 - **Account panel**: balance, positions with liquidation price, open orders with cancel, for the current market's venue. Open orders show as price lines on the chart.
 - **Mainnet / testnet switch** in the header.
 - **Verified PnL** for any address: period PnL, account value, max drawdown and volume from `portfolio`; open positions with liquidation prices from `clearinghouseState`; win rate, fees and per-coin realized PnL from the most recent 2,000 `userFills`.
@@ -49,6 +50,7 @@ src/pages/            Terminal (chart) and Wallet (verified PnL)
 src/components/       Chart, book ladder, trade tape, order ticket, market bar
 scripts/e2e-mock.cjs  Playwright run against a simulated Hyperliquid feed
 scripts/e2e-tools.cjs  Playwright run of indicators and drawing tools against live data
+scripts/e2e-liqmap.cjs Playwright run of the liquidation map against live data
 scripts/e2e-wallet.mjs Playwright run of connect → enable trading → order → cancel with a simulated wallet
 src/wallet/           Wallet discovery, connection, agent approval, order signing (@nktkas/hyperliquid + viem)
 ```
