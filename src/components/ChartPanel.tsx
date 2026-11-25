@@ -62,6 +62,8 @@ const toVol = (c: RawCandle) => ({
 export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, walletFills, openOrders, indicators, tool, onToolDone, clearDrawings, liqMap, onLiqStats, onPricePick }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  // Set when the chart is torn down, so late timers and other effects' cleanups leave it alone.
+  const disposedRef = useRef(false);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
@@ -197,10 +199,14 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     heatRef.current = heat;
     bubblesRef.current = bubbles;
     drawRef.current = draw;
+    disposedRef.current = false;
     return () => {
       window.removeEventListener('keydown', onKey);
       indSeriesRef.current.clear();
-      chart.remove();
+      disposedRef.current = true;
+      // React runs the other effects' cleanups after this one, and some of them touch series
+      // (price lines, markers). Remove the chart once they have finished.
+      queueMicrotask(() => chart.remove());
       chartRef.current = seriesRef.current = volRef.current = heatRef.current = bubblesRef.current = null;
       markersRef.current = null;
     };
@@ -219,12 +225,13 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     mapper.barTimesMs = [];
     candlesRef.current = [];
     let pending = false;
+    let recalcTimer: number | undefined;
     const scheduleRecalc = () => {
       if (pending) return;
       pending = true;
-      window.setTimeout(() => {
+      recalcTimer = window.setTimeout(() => {
         pending = false;
-        recalcRef.current();
+        if (!disposedRef.current) recalcRef.current();
       }, 1000);
     };
     series.setData([]);
@@ -259,6 +266,7 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     return () => {
       ac.abort();
       unsub?.();
+      window.clearTimeout(recalcTimer);
     };
   }, [market.name, interval]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -343,6 +351,7 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
   }, [indicators]);
 
   recalcRef.current = () => {
+    if (disposedRef.current) return;
     const ks = candlesRef.current;
     if (!ks.length) return;
     const closes = ks.map((k) => k.c);
@@ -387,11 +396,14 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     }
     prim.step = niceStep(Number(market.ctx.markPx));
     let pending = false;
+    let liqTimer: number | undefined;
+    let stopped = false;
     const scanner = new LiquidationScanner(market.name, market.dex, () => {
-      if (pending) return;
+      if (pending || stopped) return;
       pending = true;
-      window.setTimeout(() => {
+      liqTimer = window.setTimeout(() => {
         pending = false;
+        if (disposedRef.current || stopped) return;
         prim.buckets = bucketLiquidations(scanner.positions.values(), prim.step);
         prim.update();
         let longs = 0;
@@ -415,7 +427,11 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     });
     scanner.start();
     liqStatsRef.current({ wallets: 0, scanned: 0, positions: 0, longs: 0, shorts: 0, below: null, above: null });
-    return () => scanner.stop();
+    return () => {
+      stopped = true;
+      scanner.stop();
+      window.clearTimeout(liqTimer);
+    };
   }, [market.name, liqMap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Drawings: load per market, keep price labels at the market's precision.
