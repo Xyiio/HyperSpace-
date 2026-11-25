@@ -11,6 +11,7 @@ import {
 } from '../hl/api';
 import { fillStats, fmtUsd, periodSummary, shortAddr } from '../hl/stats';
 import { PnlChart } from '../components/PnlChart';
+import { WalletSocial } from '../components/WalletSocial';
 
 const PERIODS: { key: PortfolioPeriod; label: string }[] = [
   { key: 'day', label: '24h' },
@@ -200,6 +201,7 @@ export function Wallet({ address, onRoute }: { address: string | null; onRoute: 
             Period PnL and account value come from Hyperliquid's portfolio history. Win rate and per-coin numbers use the most recent{' '}
             {stats.fills} fills the API returns (up to 2,000), counting each fill with closed PnL as one closed trade.
           </p>
+          <WalletSocial address={address} onRoute={onRoute} />
         </>
       )}
     </div>

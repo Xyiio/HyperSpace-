@@ -177,3 +177,17 @@ button.primary { background: rgba(38, 198, 218, 0.15); border-color: var(--accen
 .draw-tools button { padding: 3px 8px; font-size: 12px; }
 .draw-tools button.on { background: rgba(245, 197, 66, 0.15); border-color: #f5c542; color: #f5c542; }
 .chart-tool-hint { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: #0f151c; border: 1px solid #f5c542; color: #f5c542; border-radius: 6px; padding: 3px 10px; font-size: 12px; pointer-events: none; z-index: 5; }
+/* ---------- Ideas ---------- */
+.ideas { max-width: 960px; }
+.idea-form { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; padding: 12px; border: 1px solid var(--line, #1e2733); border-radius: 8px; }
+.idea-form .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.idea-form input { min-width: 0; flex: 1 1 120px; }
+.idea-form textarea { width: 100%; resize: vertical; font: inherit; background: transparent; color: inherit; border: 1px solid var(--line, #1e2733); border-radius: 6px; padding: 8px; box-sizing: border-box; }
+.ideas-filter { margin: 8px 0; }
+.idea { border: 1px solid var(--line, #1e2733); border-radius: 8px; padding: 12px; margin: 10px 0; }
+.idea-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }
+.idea-title { margin-top: 6px; font-weight: 600; }
+.idea-body { white-space: pre-wrap; margin: 8px 0; }
+.idea-proof { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; }
+.wallet-social { margin-top: 20px; }
+.profile-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }

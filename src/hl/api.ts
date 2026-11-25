@@ -184,6 +184,11 @@ export interface Fill {
   liquidation?: { liquidatedUser?: string; markPx: string; method: string };
 }
 
+/** Fills at or after startTime (ms), up to 2000 per call. */
+export function fetchFillsSince(user: string, startTime: number, signal?: AbortSignal) {
+  return info<Fill[]>({ type: 'userFillsByTime', user, startTime, aggregateByTime: true }, signal);
+}
+
 // Returns at most the 2000 most recent fills.
 export function fetchFills(user: string, signal?: AbortSignal) {
   return info<Fill[]>({ type: 'userFills', user }, signal);

@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react';
 import { fetchMarkets, isAddress, type Market } from './hl/api';
 import { Terminal } from './pages/Terminal';
 import { Wallet } from './pages/Wallet';
+import { Ideas } from './pages/Ideas';
 import { WalletProvider } from './wallet/WalletContext';
 import { NetworkSwitch, WalletButton } from './components/WalletButton';
 import { NETWORK } from './hl/network';
 
-type Route = { page: 'trade'; coin: string; wallet: string | null } | { page: 'wallet'; address: string | null };
+type Route = { page: 'trade'; coin: string; wallet: string | null } | { page: 'wallet'; address: string | null }
+  | { page: 'ideas'; coin: string | null };
 
 function parse(hash: string): Route {
   const [path, query] = hash.replace(/^#\/?/, '').split('?');
@@ -15,6 +17,7 @@ function parse(hash: string): Route {
     const a = parts[1]?.toLowerCase() ?? null;
     return { page: 'wallet', address: a && isAddress(a) ? a : null };
   }
+  if (parts[0] === 'ideas') return { page: 'ideas', coin: parts[1] ? decodeURIComponent(parts[1]) : null };
   const w = new URLSearchParams(query ?? '').get('wallet');
   return { page: 'trade', coin: parts[1] ? decodeURIComponent(parts[1]) : 'BTC', wallet: w && isAddress(w) ? w.toLowerCase() : null };
 }
@@ -62,6 +65,9 @@ export default function App() {
           <a className={route.page === 'wallet' ? 'on' : ''} href="#/wallet">
             Verified PnL
           </a>
+          <a className={route.page === 'ideas' ? 'on' : ''} href="#/ideas">
+            Ideas
+          </a>
         </nav>
         <span className="muted small top-note">Live data from Hyperliquid {NETWORK}</span>
         <NetworkSwitch />
@@ -70,6 +76,8 @@ export default function App() {
       {error && <div className="error">{error}</div>}
       {route.page === 'wallet' ? (
         <Wallet address={route.address} onRoute={go} />
+      ) : route.page === 'ideas' ? (
+        <Ideas markets={markets ?? []} coin={route.coin} onRoute={go} />
       ) : markets ? (
         <Terminal markets={markets} coin={route.coin} overlay={route.wallet} onRoute={go} />
       ) : (

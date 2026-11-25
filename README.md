@@ -64,3 +64,16 @@ src/wallet/           Wallet discovery, connection, agent approval, order signin
 4. HYPERSPACE token: HIP-1 spot token on Hyperliquid tied to fees and marketplace payouts (design only; nothing is deployed without the owner's sign-off)
 
 Charts use the open-source [lightweight-charts](https://github.com/tradingview/lightweight-charts) library (Apache 2.0), which requires its attribution logo to stay visible.
+
+## Trade ideas and profiles (Supabase)
+
+Phase 2 adds chartist profiles and trade ideas. Every post is signed by the author's wallet (EIP-191, no transaction), and the server stamps it with the market price and the author's live Hyperliquid position at posting time. Each idea card then checks the price path against the target and stop, and the author's own fills since posting.
+
+Setup:
+
+1. Create a Supabase project.
+2. `supabase link --project-ref <ref>` then `supabase db push` (applies `supabase/migrations`).
+3. `supabase functions deploy post-idea save-profile` (they use the built-in `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` secrets).
+4. In `.env.local` set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (the public anon key only; the service_role key must never reach the browser).
+
+Without those env vars the Ideas page shows a "not connected" note and the rest of the app works normally. Tables are read-only to the public through row-level security; all writes go through the edge functions after the signature is verified.
