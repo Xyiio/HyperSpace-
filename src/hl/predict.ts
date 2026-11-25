@@ -128,10 +128,10 @@ export class GhostCandlePrimitive extends BasePrimitive {
     const yl = this.y(p.l);
     if (x === null || xPrev === null || yo === null || yc === null || yh === null || yl === null) return;
     const spacing = Math.max(3, x - xPrev);
-    const half = Math.max(1.5, spacing * 0.4);
+    const half = Math.max(3, spacing * 0.4);
     const col = p.c >= p.o ? this.up : this.down;
     target.useMediaCoordinateSpace(({ context: ctx }) => {
-      ctx.strokeStyle = withAlpha(col, 0.55);
+      ctx.strokeStyle = withAlpha(col, 0.75);
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(x, yh);
@@ -139,14 +139,20 @@ export class GhostCandlePrimitive extends BasePrimitive {
       ctx.stroke();
       const top = Math.min(yo, yc);
       const h = Math.max(2, Math.abs(yc - yo));
-      ctx.fillStyle = withAlpha(col, 0.28);
+      ctx.fillStyle = withAlpha(col, 0.4);
       ctx.fillRect(x - half, top, half * 2, h);
       ctx.setLineDash([3, 2]);
       ctx.strokeRect(x - half, top, half * 2, h);
       ctx.setLineDash([]);
+      // Label above the wick, on a dark chip so it reads over the heatmap.
       ctx.font = '10px system-ui, sans-serif';
-      ctx.fillStyle = withAlpha(col, 0.8);
-      ctx.fillText('next?', x + half + 3, Math.min(yh, yl) - 2 + 10);
+      const label = 'next?';
+      const tw = ctx.measureText(label).width;
+      const ly = Math.min(yh, yl) - 16;
+      ctx.fillStyle = 'rgba(11,15,20,0.85)';
+      ctx.fillRect(x - tw / 2 - 3, ly, tw + 6, 13);
+      ctx.fillStyle = withAlpha(col, 0.95);
+      ctx.fillText(label, x - tw / 2, ly + 10);
     });
   }
 }
