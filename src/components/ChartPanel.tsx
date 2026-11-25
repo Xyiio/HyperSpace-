@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   CandlestickSeries,
+  LineSeries,
   ColorType,
   CrosshairMode,
   HistogramSeries,
@@ -17,6 +18,8 @@ import { fetchCandles, INTERVAL_MS, type Fill, type OpenOrder, type Interval, ty
 import { hlSocket } from '../hl/ws';
 import { HeatmapPrimitive, TimeMapper, TradeBubblesPrimitive } from '../hl/primitives';
 import { bookToSnapshot, priceDecimals } from '../hl/stats';
+import { bollinger, ema, macd, rsi, sma, vwap, type Candle, type IndicatorConfig } from '../hl/indicators';
+import { DRAWING_INFO, DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingKind } from '../hl/drawings';
 
 const MAX_SNAPSHOTS = 7200; // ~2h at one column per second
 const SNAPSHOT_EVERY_MS = 1000;
@@ -30,6 +33,10 @@ interface Props {
   bigTradeUsd: number;
   walletFills: Fill[] | null;
   openOrders?: OpenOrder[];
+  indicators: IndicatorConfig[];
+  tool: DrawingKind | null;
+  onToolDone: () => void;
+  clearDrawings: number;
   onPricePick: (px: number) => void;
 }
 
@@ -41,13 +48,15 @@ const toBar = (c: RawCandle) => ({
   close: Number(c.c),
 });
 
+const toCandle = (c: RawCandle): Candle => ({ t: c.t, o: +c.o, h: +c.h, l: +c.l, c: +c.c, v: +c.v });
+
 const toVol = (c: RawCandle) => ({
   time: Math.floor(c.t / 1000) as UTCTimestamp,
   value: Number(c.v),
   color: Number(c.c) >= Number(c.o) ? 'rgba(52,211,153,0.35)' : 'rgba(248,113,113,0.35)',
 });
 
-export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, walletFills, openOrders, onPricePick }: Props) {
+export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, walletFills, openOrders, indicators, tool, onToolDone, clearDrawings, onPricePick }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -58,6 +67,18 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
   const bubblesRef = useRef<TradeBubblesPrimitive | null>(null);
   const pickRef = useRef(onPricePick);
   pickRef.current = onPricePick;
+  const candlesRef = useRef<Candle[]>([]);
+  const indicatorsRef = useRef(indicators);
+  indicatorsRef.current = indicators;
+  const indSeriesRef = useRef(new Map<string, ISeriesApi<'Line' | 'Histogram'>[]>());
+  const drawRef = useRef<DrawingsPrimitive | null>(null);
+  const toolRef = useRef(tool);
+  toolRef.current = tool;
+  const toolDoneRef = useRef(onToolDone);
+  toolDoneRef.current = onToolDone;
+  const coinRef = useRef(market.name);
+  coinRef.current = market.name;
+  const recalcRef = useRef<() => void>(() => {});
   const [status, setStatus] = useState<string>('Loading candles…');
 
   // Create the chart once.
@@ -91,13 +112,73 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     series.attachPrimitive(heat);
     series.attachPrimitive(bubbles);
     markersRef.current = createSeriesMarkers(series, []);
+    const draw = new DrawingsPrimitive(mapperRef.current);
+    series.attachPrimitive(draw);
 
-    // Click anywhere on the chart to stage an order at that price.
+    const toPoint = (x: number, y: number) => {
+      const l = chart.timeScale().coordinateToLogical(x);
+      const p = series.coordinateToPrice(y);
+      const t = l === null ? null : mapperRef.current.timeAt(l);
+      return t === null || p === null ? null : { t, p };
+    };
+    const persist = () => saveDrawings(coinRef.current, draw.drawings);
+
+    // Clicks: place drawings when a tool is active, select a drawing under the cursor,
+    // otherwise stage an order at that price.
     chart.subscribeClick((p) => {
       if (!p.point) return;
+      const kind = toolRef.current;
+      if (kind) {
+        const pt = toPoint(p.point.x, p.point.y);
+        if (!pt) return;
+        if (!draw.draft) {
+          const d: Drawing = { id: crypto.randomUUID(), kind, a: pt, b: pt, color: '#f5c542' };
+          if (DRAWING_INFO[kind].points === 1) {
+            draw.drawings.push(d);
+            persist();
+            toolDoneRef.current();
+          } else draw.draft = d;
+        } else {
+          draw.draft.b = pt;
+          draw.drawings.push(draw.draft);
+          draw.draft = null;
+          persist();
+          toolDoneRef.current();
+        }
+        draw.update();
+        return;
+      }
+      const hit = draw.hit(p.point.x, p.point.y);
+      draw.selected = hit;
+      draw.update();
+      if (hit) return;
       const px = series.coordinateToPrice(p.point.y);
       if (px !== null) pickRef.current(px);
     });
+    chart.subscribeCrosshairMove((p) => {
+      if (!draw.draft || !p.point) return;
+      const pt = toPoint(p.point.x, p.point.y);
+      if (pt) {
+        draw.draft.b = pt;
+        draw.update();
+      }
+    });
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      if ((e.key === 'Delete' || e.key === 'Backspace') && draw.selected) {
+        draw.drawings = draw.drawings.filter((d) => d.id !== draw.selected);
+        draw.selected = null;
+        persist();
+        draw.update();
+      } else if (e.key === 'Escape') {
+        draw.draft = null;
+        draw.selected = null;
+        draw.update();
+        toolDoneRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKey);
 
     // ?debug exposes internals for the e2e script.
     if (location.search.includes("debug")) (window as any).__hl = { chart, series, mapper: mapperRef.current, heat, bubbles };
@@ -106,7 +187,10 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     volRef.current = vol;
     heatRef.current = heat;
     bubblesRef.current = bubbles;
+    drawRef.current = draw;
     return () => {
+      window.removeEventListener('keydown', onKey);
+      indSeriesRef.current.clear();
       chart.remove();
       chartRef.current = seriesRef.current = volRef.current = heatRef.current = bubblesRef.current = null;
       markersRef.current = null;
@@ -124,16 +208,29 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     series.applyOptions({ priceFormat: { type: 'price', precision: dec, minMove: 10 ** -dec } });
     mapper.intervalMs = INTERVAL_MS[interval];
     mapper.barTimesMs = [];
+    candlesRef.current = [];
+    let pending = false;
+    const scheduleRecalc = () => {
+      if (pending) return;
+      pending = true;
+      window.setTimeout(() => {
+        pending = false;
+        recalcRef.current();
+      }, 1000);
+    };
     series.setData([]);
     vol.setData([]);
     setStatus('Loading candles…');
 
-    fetchCandles(market.name, interval, 500, ac.signal)
+    // 1m needs ~1,500 bars so the daily VWAP covers the whole UTC day.
+    fetchCandles(market.name, interval, interval === '1m' ? 1500 : 500, ac.signal)
       .then((candles) => {
         if (ac.signal.aborted) return;
         series.setData(candles.map(toBar));
         vol.setData(candles.map(toVol));
         mapper.barTimesMs = candles.map((c) => c.t);
+        candlesRef.current = candles.map(toCandle);
+        recalcRef.current();
         chartRef.current?.timeScale().scrollToRealTime();
         setStatus('');
         unsub = hlSocket.subscribe({ type: 'candle', coin: market.name, interval }, (c: RawCandle) => {
@@ -141,6 +238,10 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
           vol.update(toVol(c));
           const bars = mapper.barTimesMs;
           if (bars.length === 0 || c.t > bars[bars.length - 1]) bars.push(c.t);
+          const ks = candlesRef.current;
+          if (ks.length && ks[ks.length - 1].t === c.t) ks[ks.length - 1] = toCandle(c);
+          else if (!ks.length || c.t > ks[ks.length - 1].t) ks.push(toCandle(c));
+          scheduleRecalc();
         });
       })
       .catch((e) => {
@@ -194,6 +295,107 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     });
   }, [market.name, bigTradeUsd]);
 
+  // Indicators: rebuild series when the list changes; recompute values on new candles.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const map = indSeriesRef.current;
+    map.forEach((list) => list.forEach((s) => chart.removeSeries(s)));
+    map.clear();
+    // Drop panes left empty by removed oscillators (pane 0 holds the candles).
+    for (const pane of [...chart.panes()].reverse()) {
+      if (pane.paneIndex() > 0 && pane.getSeries().length === 0) chart.removePane(pane.paneIndex());
+    }
+    let nextPane = 1;
+    const line = (pane: number, color: string, width: 1 | 2 = 1, title = '') =>
+      chart.addSeries(LineSeries, { color, lineWidth: width, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, title }, pane);
+    for (const cfg of indicators) {
+      const list: ISeriesApi<'Line' | 'Histogram'>[] = [];
+      if (cfg.kind === 'sma' || cfg.kind === 'ema' || cfg.kind === 'vwap') list.push(line(0, cfg.color, 2));
+      else if (cfg.kind === 'bb') list.push(line(0, cfg.color), line(0, cfg.color, 1), line(0, cfg.color));
+      else if (cfg.kind === 'rsi') {
+        const pane = nextPane++;
+        const s = line(pane, cfg.color, 2, `RSI ${cfg.params[0]}`);
+        s.createPriceLine({ price: 70, color: '#3a4655', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
+        s.createPriceLine({ price: 30, color: '#3a4655', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
+        list.push(s);
+      } else if (cfg.kind === 'macd') {
+        const pane = nextPane++;
+        list.push(
+          chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pane),
+          line(pane, cfg.color, 2, 'MACD'),
+          line(pane, '#94a3b8', 1, 'Signal'),
+        );
+      }
+      map.set(cfg.id, list);
+    }
+    for (const pane of chart.panes()) if (pane.paneIndex() > 0) pane.setHeight(110);
+    recalcRef.current();
+  }, [indicators]);
+
+  recalcRef.current = () => {
+    const ks = candlesRef.current;
+    if (!ks.length) return;
+    const closes = ks.map((k) => k.c);
+    const time = (i: number) => (ks[i].t / 1000) as UTCTimestamp;
+    const toLine = (vals: number[]) => vals.map((v, i) => (Number.isFinite(v) ? { time: time(i), value: v } : { time: time(i) }));
+    for (const cfg of indicatorsRef.current) {
+      const list = indSeriesRef.current.get(cfg.id);
+      if (!list) continue;
+      const [a, b, c] = cfg.params;
+      if (cfg.kind === 'sma') list[0].setData(toLine(sma(closes, a)));
+      else if (cfg.kind === 'ema') list[0].setData(toLine(ema(closes, a)));
+      else if (cfg.kind === 'vwap') list[0].setData(toLine(vwap(ks)));
+      else if (cfg.kind === 'bb') {
+        const r = bollinger(closes, a, b);
+        list[0].setData(toLine(r.upper));
+        list[1].setData(toLine(r.mid));
+        list[2].setData(toLine(r.lower));
+      } else if (cfg.kind === 'rsi') list[0].setData(toLine(rsi(closes, a)));
+      else if (cfg.kind === 'macd') {
+        const r = macd(closes, a, b, c);
+        list[0].setData(
+          r.hist.map((v, i) =>
+            Number.isFinite(v) ? { time: time(i), value: v, color: v >= 0 ? 'rgba(52,211,153,0.6)' : 'rgba(248,113,113,0.6)' } : { time: time(i) },
+          ),
+        );
+        list[1].setData(toLine(r.line));
+        list[2].setData(toLine(r.signal));
+      }
+    }
+  };
+
+  // Drawings: load per market, keep price labels at the market's precision.
+  useEffect(() => {
+    const draw = drawRef.current;
+    if (!draw) return;
+    draw.drawings = loadDrawings(market.name);
+    draw.draft = null;
+    draw.selected = null;
+    draw.decimals = priceDecimals(Number(market.ctx.markPx), market.szDecimals);
+    draw.update();
+  }, [market.name]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const draw = drawRef.current;
+    if (!draw || clearDrawings === 0) return;
+    draw.drawings = [];
+    draw.draft = null;
+    draw.selected = null;
+    saveDrawings(market.name, []);
+    draw.update();
+  }, [clearDrawings]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Leaving a tool half-placed cancels the draft.
+  useEffect(() => {
+    const draw = drawRef.current;
+    if (draw && !tool && draw.draft) {
+      draw.draft = null;
+      draw.update();
+    }
+    if (hostRef.current) hostRef.current.style.cursor = tool ? 'crosshair' : '';
+  }, [tool]);
+
   // Overlay a wallet's real fills on the chart as markers.
   useEffect(() => {
     const markers = markersRef.current;
@@ -239,6 +441,7 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     <div className="chart-wrap">
       <div ref={hostRef} className="chart-host" />
       {status && <div className="chart-status">{status}</div>}
+      {tool && <div className="chart-tool-hint">{DRAWING_INFO[tool].label}: click {DRAWING_INFO[tool].points === 2 ? 'two points' : 'a price'} · Esc to cancel</div>}
     </div>
   );
 }

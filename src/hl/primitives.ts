@@ -49,9 +49,17 @@ export class TimeMapper {
     }
     return lo + (tMs - bars[lo]) / this.intervalMs;
   }
+
+  /** Inverse of logical(): wall-clock time for a fractional bar index (extrapolates past either end). */
+  timeAt(logical: number): number | null {
+    const bars = this.barTimesMs;
+    if (bars.length === 0) return null;
+    const i = Math.max(0, Math.min(bars.length - 1, Math.floor(logical)));
+    return bars[i] + (logical - i) * this.intervalMs;
+  }
 }
 
-abstract class BasePrimitive implements ISeriesPrimitive<Time> {
+export abstract class BasePrimitive implements ISeriesPrimitive<Time> {
   protected chart: IChartApi | null = null;
   protected series: ISeriesApi<SeriesType> | null = null;
   private requestUpdate: (() => void) | null = null;
@@ -80,7 +88,7 @@ abstract class BasePrimitive implements ISeriesPrimitive<Time> {
     this.requestUpdate?.();
   }
 
-  protected x(tMs: number): number | null {
+  x(tMs: number): number | null {
     const l = this.mapper.logical(tMs);
     if (l === null || !this.chart) return null;
     // logicalToCoordinate only resolves whole bar indices, so interpolate between two.
@@ -92,7 +100,7 @@ abstract class BasePrimitive implements ISeriesPrimitive<Time> {
     return a + (l - i) * (b - a);
   }
 
-  protected y(px: number): number | null {
+  y(px: number): number | null {
     return this.series?.priceToCoordinate(px) ?? null;
   }
 

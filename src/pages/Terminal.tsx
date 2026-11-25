@@ -5,6 +5,8 @@ import { BookLadder } from '../components/BookLadder';
 import { TradeTape } from '../components/TradeTape';
 import { OrderTicket } from '../components/OrderTicket';
 import { AccountPanel } from '../components/AccountPanel';
+import { ChartTools, useIndicators } from '../components/ChartTools';
+import type { DrawingKind } from '../hl/drawings';
 import { MarketBar } from '../components/MarketBar';
 import { shortAddr } from '../hl/stats';
 
@@ -40,6 +42,9 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
   const [fills, setFills] = useState<Fill[] | null>(null);
   const [fillsMsg, setFillsMsg] = useState('');
   const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
+  const [indicators, setIndicators] = useIndicators();
+  const [tool, setTool] = useState<DrawingKind | null>(null);
+  const [clearDrawings, setClearDrawings] = useState(0);
 
   useEffect(() => {
     setBigTrade(defaultBigTrade(market));
@@ -108,6 +113,7 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
       </div>
       <div className="workspace">
         <div className="main-col">
+          <ChartTools indicators={indicators} onIndicators={setIndicators} tool={tool} onTool={setTool} onClearDrawings={() => setClearDrawings((n) => n + 1)} />
           <ChartPanel
             market={market}
             interval={interval}
@@ -116,6 +122,10 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
             bigTradeUsd={bigTrade}
             walletFills={fills}
             openOrders={openOrders}
+            indicators={indicators}
+            tool={tool}
+            onToolDone={() => setTool(null)}
+            clearDrawings={clearDrawings}
             onPricePick={setPrice}
           />
           <p className="legend">
