@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  AreaSeries,
+  BarSeries,
   CandlestickSeries,
   LineSeries,
   ColorType,
@@ -20,9 +22,11 @@ import { HeatmapPrimitive, TimeMapper, TradeBubblesPrimitive } from '../hl/primi
 import { bookToSnapshot, priceDecimals } from '../hl/stats';
 import { bollinger, ema, macd, rsi, sma, vwap, type Candle, type IndicatorConfig } from '../hl/indicators';
 import { LiquidationPrimitive, LiquidationScanner, bucketLiquidations, niceStep, type LiqStats } from '../hl/liqmap';
-import { DRAWING_INFO, DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingKind } from '../hl/drawings';
+import { DRAWING_INFO, DRAW_COLORS, DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingKind } from '../hl/drawings';
+import { isLight, withAlpha, type ChartStyle } from '../hl/chartStyle';
+import { GhostCandlePrimitive, bookImbalance, predictNext, type Prediction } from '../hl/predict';
+import { VolumeProfilePrimitive, loadBookHistory, saveBookHistory, thinSnapshots, volumeProfile } from '../hl/profile';
 
-const MAX_SNAPSHOTS = 7200; // ~2h at one column per second
 const SNAPSHOT_EVERY_MS = 1000;
 const MAX_BUBBLES = 600;
 
@@ -41,6 +45,11 @@ interface Props {
   liqMap: boolean;
   onLiqStats: (s: LiqStats | null) => void;
   onPricePick: (px: number) => void;
+  drawColor: string;
+  chartStyle: ChartStyle;
+  volProfile: boolean;
+  prediction: boolean;
+  onPrediction: (p: Prediction | null) => void;
 }
 
 const toBar = (c: RawCandle) => ({
@@ -53,13 +62,36 @@ const toBar = (c: RawCandle) => ({
 
 const toCandle = (c: RawCandle): Candle => ({ t: c.t, o: +c.o, h: +c.h, l: +c.l, c: +c.c, v: +c.v });
 
-const toVol = (c: RawCandle) => ({
+const toVol = (c: RawCandle, st: ChartStyle) => ({
   time: Math.floor(c.t / 1000) as UTCTimestamp,
   value: Number(c.v),
-  color: Number(c.c) >= Number(c.o) ? 'rgba(52,211,153,0.35)' : 'rgba(248,113,113,0.35)',
+  color: withAlpha(Number(c.c) >= Number(c.o) ? st.up : st.down, 0.35),
 });
 
-export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, walletFills, openOrders, indicators, tool, onToolDone, clearDrawings, liqMap, onLiqStats, onPricePick }: Props) {
+const CLEAR = 'rgba(0,0,0,0)';
+type AltSeries = ISeriesApi<'Bar'> | ISeriesApi<'Line'> | ISeriesApi<'Area'>;
+
+export function ChartPanel({
+  market,
+  interval,
+  nSigFigs,
+  heatmap,
+  bigTradeUsd,
+  walletFills,
+  openOrders,
+  indicators,
+  tool,
+  onToolDone,
+  clearDrawings,
+  liqMap,
+  onLiqStats,
+  onPricePick,
+  drawColor,
+  chartStyle,
+  volProfile,
+  prediction,
+  onPrediction,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   // Set when the chart is torn down, so late timers and other effects' cleanups leave it alone.
@@ -88,6 +120,23 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
   const liqStatsRef = useRef(onLiqStats);
   liqStatsRef.current = onLiqStats;
   const [status, setStatus] = useState<string>('Loading candles…');
+  const styleRef = useRef(chartStyle);
+  styleRef.current = chartStyle;
+  const drawColorRef = useRef(drawColor);
+  drawColorRef.current = drawColor;
+  // Bars, line and area styles draw on this extra series; the candle series stays (transparent)
+  // because the overlays and drawings are attached to it.
+  const altRef = useRef<AltSeries | null>(null);
+  const ghostRef = useRef<GhostCandlePrimitive | null>(null);
+  const profileRef = useRef<VolumeProfilePrimitive | null>(null);
+  const lastBookRef = useRef<L2Book | null>(null);
+  const predCbRef = useRef(onPrediction);
+  predCbRef.current = onPrediction;
+  // The selected drawing (for the colour / delete bar) and the open text editor.
+  const [sel, setSel] = useState<Drawing | null>(null);
+  const [textEdit, setTextEdit] = useState<{ id: string; x: number; y: number; value: string; isNew: boolean } | null>(null);
+  const uiRef = useRef({ setSel, setTextEdit });
+  uiRef.current = { setSel, setTextEdit };
 
   // Create the chart once.
   useEffect(() => {
@@ -125,6 +174,12 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     const liq = new LiquidationPrimitive(mapperRef.current);
     series.attachPrimitive(liq);
     liqRef.current = liq;
+    const ghost = new GhostCandlePrimitive(mapperRef.current);
+    series.attachPrimitive(ghost);
+    ghostRef.current = ghost;
+    const profile = new VolumeProfilePrimitive(mapperRef.current);
+    series.attachPrimitive(profile);
+    profileRef.current = profile;
 
     const toPoint = (x: number, y: number) => {
       const l = chart.timeScale().coordinateToLogical(x);
@@ -134,6 +189,20 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     };
     const persist = () => saveDrawings(coinRef.current, draw.drawings);
 
+    const select = (id: string | null) => {
+      draw.selected = id;
+      draw.update();
+      uiRef.current.setSel(id ? { ...draw.drawings.find((d) => d.id === id)! } : null);
+    };
+    const openText = (d: Drawing, isNew: boolean) => {
+      const x = draw.x(d.a.t);
+      const y = draw.y(d.a.p);
+      if (x === null || y === null) return;
+      uiRef.current.setTextEdit({ id: d.id, x, y, value: d.text ?? '', isNew });
+    };
+    const colorFor = (kind: DrawingKind) =>
+      kind === 'arrowUp' ? styleRef.current.up : kind === 'arrowDown' ? styleRef.current.down : drawColorRef.current;
+
     // Placing drawing points uses native pointer events: lightweight-charts drops the second of two
     // quick clicks (it treats them as a double-click), which lost the end point of trend lines and fibs.
     let placedAt = 0;
@@ -142,27 +211,62 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
       const r = host.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     };
+    const inPricePane = (x: number, y: number) => x >= 0 && x <= chart.timeScale().width() && y >= 0 && y <= chart.panes()[0].getHeight();
     const onDown = (e: PointerEvent) => {
-      down = toolRef.current && e.button === 0 ? local(e) : null;
+      const kind = toolRef.current;
+      down = kind && e.button === 0 ? local(e) : null;
+      if (kind !== 'pen' || !down || !inPricePane(down.x, down.y)) return;
+      // Freehand: start a path and follow the pointer until release.
+      const pt = toPoint(down.x, down.y);
+      if (!pt) return;
+      host.setPointerCapture(e.pointerId);
+      draw.draft = { id: crypto.randomUUID(), kind: 'pen', a: pt, b: pt, color: colorFor('pen'), pts: [pt] };
+      draw.update();
+    };
+    let lastPen = { x: 0, y: 0 };
+    const onMove = (e: PointerEvent) => {
+      if (draw.draft?.kind !== 'pen' || !down) return;
+      const { x, y } = local(e);
+      if (Math.hypot(x - lastPen.x, y - lastPen.y) < 3) return;
+      lastPen = { x, y };
+      const pt = toPoint(x, y);
+      if (!pt) return;
+      draw.draft.pts!.push(pt);
+      draw.draft.b = pt;
+      draw.update();
     };
     const onUp = (e: PointerEvent) => {
       const kind = toolRef.current;
       const start = down;
       down = null;
       if (!kind || !start) return;
+      if (kind === 'pen') {
+        const d = draw.draft;
+        draw.draft = null;
+        if (d?.kind === 'pen' && (d.pts?.length ?? 0) > 1) {
+          draw.drawings.push(d);
+          persist();
+          placedAt = performance.now();
+          toolDoneRef.current();
+        }
+        draw.update();
+        return;
+      }
       const { x, y } = local(e);
       // Ignore drags (panning) and clicks outside the main price pane.
       if (Math.hypot(x - start.x, y - start.y) > 5) return;
-      if (x < 0 || x > chart.timeScale().width() || y < 0 || y > chart.panes()[0].getHeight()) return;
+      if (!inPricePane(x, y)) return;
       const pt = toPoint(x, y);
       if (!pt) return;
       if (draw.draft && draw.draft.kind !== kind) draw.draft = null;
       placedAt = performance.now();
       if (!draw.draft) {
-        const d: Drawing = { id: crypto.randomUUID(), kind, a: pt, b: pt, color: '#f5c542' };
-        if (DRAWING_INFO[kind].points === 1) {
+        const d: Drawing = { id: crypto.randomUUID(), kind, a: pt, b: pt, color: colorFor(kind) };
+        if (DRAWING_INFO[kind].place === 'one') {
+          if (kind === 'text') d.text = '';
           draw.drawings.push(d);
-          persist();
+          if (kind === 'text') openText(d, true);
+          else persist();
           toolDoneRef.current();
         } else draw.draft = d;
       } else {
@@ -175,6 +279,7 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
       draw.update();
     };
     host.addEventListener('pointerdown', onDown);
+    host.addEventListener('pointermove', onMove);
     host.addEventListener('pointerup', onUp);
 
     // With no tool: select a drawing under the cursor, otherwise stage an order at that price.
@@ -182,14 +287,20 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
       // The click that finished a drawing must not also select something or stage an order.
       if (!p.point || toolRef.current || performance.now() - placedAt < 400) return;
       const hit = draw.hit(p.point.x, p.point.y);
-      draw.selected = hit;
-      draw.update();
+      select(hit);
       if (hit) return;
       const px = series.coordinateToPrice(p.point.y);
       if (px !== null) pickRef.current(px);
     });
+    // Double-click a text box to edit it.
+    chart.subscribeDblClick((p) => {
+      if (!p.point || toolRef.current) return;
+      const hit = draw.hit(p.point.x, p.point.y);
+      const d = draw.drawings.find((x) => x.id === hit);
+      if (d?.kind === 'text') openText(d, false);
+    });
     chart.subscribeCrosshairMove((p) => {
-      if (!draw.draft || !p.point) return;
+      if (!draw.draft || draw.draft.kind === 'pen' || !p.point) return;
       const pt = toPoint(p.point.x, p.point.y);
       if (pt) {
         draw.draft.b = pt;
@@ -201,13 +312,11 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
       if ((e.key === 'Delete' || e.key === 'Backspace') && draw.selected) {
         draw.drawings = draw.drawings.filter((d) => d.id !== draw.selected);
-        draw.selected = null;
         persist();
-        draw.update();
+        select(null);
       } else if (e.key === 'Escape') {
         draw.draft = null;
-        draw.selected = null;
-        draw.update();
+        select(null);
         toolDoneRef.current();
       }
     };
@@ -225,6 +334,7 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     return () => {
       window.removeEventListener('keydown', onKey);
       host.removeEventListener('pointerdown', onDown);
+      host.removeEventListener('pointermove', onMove);
       host.removeEventListener('pointerup', onUp);
       indSeriesRef.current.clear();
       disposedRef.current = true;
@@ -232,6 +342,7 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
       // (price lines, markers). Remove the chart once they have finished.
       queueMicrotask(() => chart.remove());
       chartRef.current = seriesRef.current = volRef.current = heatRef.current = bubblesRef.current = null;
+      altRef.current = null;
       markersRef.current = null;
     };
   }, []);
@@ -260,6 +371,7 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     };
     series.setData([]);
     vol.setData([]);
+    setAltData(altRef.current, []);
     setStatus('Loading candles…');
 
     // 1m needs ~1,500 bars so the daily VWAP covers the whole UTC day.
@@ -267,7 +379,8 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
       .then((candles) => {
         if (ac.signal.aborted) return;
         series.setData(candles.map(toBar));
-        vol.setData(candles.map(toVol));
+        vol.setData(candles.map((c) => toVol(c, styleRef.current)));
+        setAltData(altRef.current, candles.map(toBar));
         mapper.barTimesMs = candles.map((c) => c.t);
         candlesRef.current = candles.map(toCandle);
         recalcRef.current();
@@ -275,7 +388,8 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
         setStatus('');
         unsub = hlSocket.subscribe({ type: 'candle', coin: market.name, interval }, (c: RawCandle) => {
           series.update(toBar(c));
-          vol.update(toVol(c));
+          vol.update(toVol(c, styleRef.current));
+          updateAlt(altRef.current, toBar(c));
           const bars = mapper.barTimesMs;
           if (bars.length === 0 || c.t > bars[bars.length - 1]) bars.push(c.t);
           const ks = candlesRef.current;
@@ -294,20 +408,49 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     };
   }, [market.name, interval]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Order-book heatmap: one column per second, kept while this coin is open.
+  // Order-book heatmap: one column per second. History is saved in this browser per market and
+  // grouping, so it keeps building across visits (up to 24 hours).
   useEffect(() => {
     const heat = heatRef.current!;
     heat.snapshots = [];
     heat.update();
+    const coin = market.name;
+    let alive = true;
+    let loaded = false;
+    loadBookHistory(coin, nSigFigs).then((hist) => {
+      if (!alive) return;
+      const first = heat.snapshots[0]?.t ?? Infinity;
+      heat.snapshots = [...hist.filter((s) => s.t < first), ...heat.snapshots];
+      loaded = true;
+      heat.update();
+    });
+    const save = () => {
+      if (loaded && heat.snapshots.length) void saveBookHistory(coin, nSigFigs, heat.snapshots);
+    };
+    // Thin old columns and save every 30 seconds.
+    const timer = window.setInterval(() => {
+      heat.snapshots = thinSnapshots(heat.snapshots);
+      save();
+    }, 30_000);
     let lastT = 0;
-    return hlSocket.subscribe({ type: 'l2Book', coin: market.name, nSigFigs }, (book: L2Book) => {
+    const unsub = hlSocket.subscribe({ type: 'l2Book', coin, nSigFigs }, (book: L2Book) => {
+      lastBookRef.current = book;
       const now = Date.now();
       if (now - lastT < SNAPSHOT_EVERY_MS) return;
       lastT = now;
       heat.snapshots.push(bookToSnapshot(book, now));
-      if (heat.snapshots.length > MAX_SNAPSHOTS) heat.snapshots.splice(0, heat.snapshots.length - MAX_SNAPSHOTS);
       heat.update();
     });
+    const onHide = () => save();
+    window.addEventListener('pagehide', onHide);
+    return () => {
+      alive = false;
+      save();
+      unsub();
+      window.clearInterval(timer);
+      window.removeEventListener('pagehide', onHide);
+      lastBookRef.current = null;
+    };
   }, [market.name, nSigFigs]);
 
   useEffect(() => {
@@ -378,6 +521,20 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     if (disposedRef.current) return;
     const ks = candlesRef.current;
     if (!ks.length) return;
+    const ghost = ghostRef.current;
+    if (ghost?.enabled) {
+      const book = lastBookRef.current;
+      const mid = ks[ks.length - 1].c;
+      const imb = book ? bookImbalance(book.levels[0].map((l) => [+l.px, +l.sz]), book.levels[1].map((l) => [+l.px, +l.sz]), mid) : 0;
+      ghost.prediction = predictNext(ks, INTERVAL_MS[interval], imb);
+      ghost.update();
+      predCbRef.current(ghost.prediction);
+    }
+    const prof = profileRef.current;
+    if (prof?.enabled) {
+      prof.profile = volumeProfile(ks);
+      prof.update();
+    }
     const closes = ks.map((k) => k.c);
     const time = (i: number) => (ks[i].t / 1000) as UTCTimestamp;
     const toLine = (vals: number[]) => vals.map((v, i) => (Number.isFinite(v) ? { time: time(i), value: v } : { time: time(i) }));
@@ -530,11 +687,216 @@ export function ChartPanel({ market, interval, nSigFigs, heatmap, bigTradeUsd, w
     return () => lines.forEach((l) => series.removePriceLine(l));
   }, [openOrders, market.name]);
 
+  // Chart style: colours, background, grid, and the candle type.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series) return;
+    const st = chartStyle;
+    const light = isLight(st.bg);
+    const border = light ? '#d7dce3' : '#1c2530';
+    chart.applyOptions({
+      layout: { background: { type: ColorType.Solid, color: st.bg }, textColor: light ? '#4b5563' : '#8b98a9' },
+      grid: { vertLines: { color: st.gridColor, visible: st.grid }, horzLines: { color: st.gridColor, visible: st.grid } },
+      rightPriceScale: { borderColor: border },
+      timeScale: { borderColor: border },
+    });
+    if (st.type === 'candles' || st.type === 'hollow') {
+      const hollow = st.type === 'hollow';
+      series.applyOptions({
+        upColor: hollow ? CLEAR : st.up,
+        downColor: st.down,
+        borderVisible: hollow,
+        borderUpColor: st.up,
+        borderDownColor: st.down,
+        wickUpColor: st.wickUp,
+        wickDownColor: st.wickDown,
+        lastValueVisible: true,
+        priceLineVisible: true,
+        priceLineColor: '',
+      });
+    } else {
+      series.applyOptions({
+        upColor: CLEAR,
+        downColor: CLEAR,
+        borderVisible: false,
+        wickUpColor: CLEAR,
+        wickDownColor: CLEAR,
+        lastValueVisible: false,
+        priceLineVisible: false,
+      });
+    }
+    // Rebuild the alternative series for bars, line and area.
+    if (altRef.current) {
+      chart.removeSeries(altRef.current);
+      altRef.current = null;
+    }
+    const common = { priceLineVisible: true, lastValueVisible: true };
+    if (st.type === 'bars') altRef.current = chart.addSeries(BarSeries, { ...common, upColor: st.up, downColor: st.down, thinBars: false });
+    else if (st.type === 'line') altRef.current = chart.addSeries(LineSeries, { ...common, color: st.up, lineWidth: 2 });
+    else if (st.type === 'area')
+      altRef.current = chart.addSeries(AreaSeries, { ...common, lineColor: st.up, topColor: withAlpha(st.up, 0.35), bottomColor: withAlpha(st.up, 0.02), lineWidth: 2 });
+    if (altRef.current) {
+      const dec = priceDecimals(Number(market.ctx.markPx), market.szDecimals);
+      altRef.current.applyOptions({ priceFormat: { type: 'price', precision: dec, minMove: 10 ** -dec } });
+      setAltData(altRef.current, candlesRef.current.map((k) => ({ time: (k.t / 1000) as UTCTimestamp, open: k.o, high: k.h, low: k.l, close: k.c })));
+    }
+    // Volume and overlay colours follow the candle colours.
+    volRef.current?.setData(
+      candlesRef.current.map((k) => ({ time: (k.t / 1000) as UTCTimestamp, value: k.v, color: withAlpha(k.c >= k.o ? st.up : st.down, 0.35) })),
+    );
+    for (const p of [ghostRef.current, profileRef.current]) {
+      if (!p) continue;
+      p.up = st.up;
+      p.down = st.down;
+      p.update();
+    }
+  }, [chartStyle]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Next-candle prediction and volume profile toggles.
+  useEffect(() => {
+    const g = ghostRef.current;
+    if (!g) return;
+    g.enabled = prediction;
+    if (!prediction) {
+      g.prediction = null;
+      predCbRef.current(null);
+    }
+    g.update();
+    recalcRef.current();
+  }, [prediction, market.name, interval]);
+
+  useEffect(() => {
+    const p = profileRef.current;
+    if (!p) return;
+    p.enabled = volProfile;
+    if (!volProfile) p.profile = null;
+    p.update();
+    recalcRef.current();
+  }, [volProfile]);
+
+  // Freehand needs the pointer: stop the chart panning while the pen is active.
+  useEffect(() => {
+    chartRef.current?.applyOptions({ handleScroll: tool !== 'pen', handleScale: tool !== 'pen' });
+  }, [tool]);
+
+  // Edit the selected drawing.
+  const mutateSelected = (fn: (d: Drawing) => void) => {
+    const draw = drawRef.current;
+    if (!draw || !sel) return;
+    const d = draw.drawings.find((x) => x.id === sel.id);
+    if (!d) return;
+    fn(d);
+    saveDrawings(market.name, draw.drawings);
+    draw.update();
+    setSel({ ...d });
+  };
+  const deleteSelected = () => {
+    const draw = drawRef.current;
+    if (!draw || !sel) return;
+    draw.drawings = draw.drawings.filter((x) => x.id !== sel.id);
+    draw.selected = null;
+    saveDrawings(market.name, draw.drawings);
+    draw.update();
+    setSel(null);
+  };
+  const commitText = (cancel = false) => {
+    const draw = drawRef.current;
+    const te = textEdit;
+    setTextEdit(null);
+    if (!draw || !te) return;
+    const d = draw.drawings.find((x) => x.id === te.id);
+    if (!d) return;
+    const text = te.value.trim();
+    if ((cancel && te.isNew) || !text) {
+      if (cancel && !te.isNew) return;
+      draw.drawings = draw.drawings.filter((x) => x.id !== te.id);
+    } else if (!cancel) d.text = text;
+    saveDrawings(market.name, draw.drawings);
+    draw.update();
+  };
+
+  // Clear selection state when the market changes.
+  useEffect(() => {
+    setSel(null);
+    setTextEdit(null);
+  }, [market.name]);
+
+  const hint = tool
+    ? DRAWING_INFO[tool].place === 'two'
+      ? 'click two points'
+      : DRAWING_INFO[tool].place === 'drag'
+        ? 'press and drag to draw'
+        : tool === 'text'
+          ? 'click where the text goes'
+          : 'click a price'
+    : '';
+
   return (
     <div className="chart-wrap">
       <div ref={hostRef} className="chart-host" />
       {status && <div className="chart-status">{status}</div>}
-      {tool && <div className="chart-tool-hint">{DRAWING_INFO[tool].label}: click {DRAWING_INFO[tool].points === 2 ? 'two points' : 'a price'} · Esc to cancel</div>}
+      {tool && (
+        <div className="chart-tool-hint">
+          {DRAWING_INFO[tool].label}: {hint} · Esc to cancel
+        </div>
+      )}
+      {sel && !tool && (
+        <div className="draw-edit" onPointerDown={(e) => e.stopPropagation()}>
+          <span className="muted small">{DRAWING_INFO[sel.kind].label}</span>
+          {DRAW_COLORS.map((c) => (
+            <button key={c} className={`swatch${sel.color === c ? ' on' : ''}`} style={{ background: c }} title={c} onClick={() => mutateSelected((d) => (d.color = c))} />
+          ))}
+          <input type="color" title="Custom colour" value={sel.color} onChange={(e) => mutateSelected((d) => (d.color = e.target.value))} />
+          {sel.kind === 'text' && (
+            <button
+              onClick={() => {
+                const draw = drawRef.current!;
+                const d = draw.drawings.find((x) => x.id === sel.id);
+                const x = d && draw.x(d.a.t);
+                const y = d && draw.y(d.a.p);
+                if (d && x != null && y != null) setTextEdit({ id: d.id, x, y, value: d.text ?? '', isNew: false });
+              }}
+            >
+              Edit text
+            </button>
+          )}
+          <button className="danger" onClick={deleteSelected} title="Delete this drawing (Delete key)">
+            Delete
+          </button>
+        </div>
+      )}
+      {textEdit && (
+        <textarea
+          className="text-edit"
+          autoFocus
+          style={{ left: textEdit.x, top: textEdit.y }}
+          value={textEdit.value}
+          placeholder="Type, Enter to place"
+          rows={Math.max(1, textEdit.value.split('\n').length)}
+          onChange={(e) => setTextEdit({ ...textEdit, value: e.target.value })}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              commitText();
+            } else if (e.key === 'Escape') commitText(true);
+          }}
+          onBlur={() => commitText()}
+        />
+      )}
     </div>
   );
+}
+
+function setAltData(alt: AltSeries | null, bars: ReturnType<typeof toBar>[]) {
+  if (!alt) return;
+  const type = alt.seriesType();
+  if (type === 'Bar') (alt as ISeriesApi<'Bar'>).setData(bars);
+  else (alt as ISeriesApi<'Line'>).setData(bars.map((b) => ({ time: b.time, value: b.close })));
+}
+
+function updateAlt(alt: AltSeries | null, bar: ReturnType<typeof toBar>) {
+  if (!alt) return;
+  if (alt.seriesType() === 'Bar') (alt as ISeriesApi<'Bar'>).update(bar);
+  else (alt as ISeriesApi<'Line'>).update({ time: bar.time, value: bar.close });
 }

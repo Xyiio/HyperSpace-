@@ -1,6 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
 import { INDICATOR_INFO, PALETTE, shortName, type IndicatorConfig, type IndicatorKind } from '../hl/indicators';
-import { DRAWING_INFO, type DrawingKind } from '../hl/drawings';
+import { DRAWING_INFO, DRAW_COLORS, type DrawingKind } from '../hl/drawings';
+import { DEFAULT_STYLE, STYLE_LABELS, STYLE_PRESETS, type CandleStyle, type ChartStyle } from '../hl/chartStyle';
+
+/** useState that is saved in localStorage under `key`. */
+export function usePersistent<T>(key: string, initial: T) {
+  const [v, setV] = useState<T>(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(v));
+    } catch {
+      /* not persisted */
+    }
+  }, [key, v]);
+  return [v, setV] as const;
+}
 
 const KEY = 'hs.indicators';
 const DEFAULTS: IndicatorConfig[] = [
@@ -33,9 +54,13 @@ interface Props {
   tool: DrawingKind | null;
   onTool: (t: DrawingKind | null) => void;
   onClearDrawings: () => void;
+  drawColor: string;
+  onDrawColor: (c: string) => void;
+  chartStyle: ChartStyle;
+  onChartStyle: (s: ChartStyle) => void;
 }
 
-export function ChartTools({ indicators, onIndicators, tool, onTool, onClearDrawings }: Props) {
+export function ChartTools({ indicators, onIndicators, tool, onTool, onClearDrawings, drawColor, onDrawColor, chartStyle, onChartStyle }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -108,15 +133,114 @@ export function ChartTools({ indicators, onIndicators, tool, onTool, onClearDraw
       </div>
       <div className="draw-tools">
         {(Object.keys(DRAWING_INFO) as DrawingKind[]).map((k) => (
-          <button key={k} className={tool === k ? 'on' : ''} onClick={() => onTool(tool === k ? null : k)} title={`${DRAWING_INFO[k].label} (${DRAWING_INFO[k].key})`}>
-            {DRAWING_INFO[k].label}
+          <button
+            key={k}
+            className={`${tool === k ? 'on' : ''}${k === 'arrowUp' ? ' up' : k === 'arrowDown' ? ' down' : ''}`}
+            onClick={() => onTool(tool === k ? null : k)}
+            title={`${DRAWING_INFO[k].label} (${DRAWING_INFO[k].key})`}
+            aria-label={DRAWING_INFO[k].label}
+          >
+            {DRAWING_INFO[k].icon}
           </button>
         ))}
+        <ColorPick value={drawColor} onChange={onDrawColor} title="Colour for new drawings" />
         <button className="link small" onClick={onClearDrawings} title="Remove every drawing on this market">
-          Clear drawings
+          Clear all
         </button>
       </div>
-      <span className="muted small">Click a drawing to select it, Delete to remove</span>
+      <StyleMenu style={chartStyle} onChange={onChartStyle} />
+      <span className="muted small">Click a drawing to recolour or delete it</span>
+    </div>
+  );
+}
+
+function ColorPick({ value, onChange, title }: { value: string; onChange: (c: string) => void; title: string }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, []);
+  return (
+    <div className="color-pick" ref={ref}>
+      <button title={title} aria-label={title} onClick={() => setOpen((o) => !o)}>
+        <span className="sw" style={{ background: value }} /> ▾
+      </button>
+      {open && (
+        <div className="menu swatches">
+          {DRAW_COLORS.map((c) => (
+            <button
+              key={c}
+              className={`swatch${value === c ? ' on' : ''}`}
+              style={{ background: c }}
+              title={c}
+              onClick={() => {
+                onChange(c);
+                setOpen(false);
+              }}
+            />
+          ))}
+          <input type="color" value={value} onChange={(e) => onChange(e.target.value)} title="Custom colour" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StyleMenu({ style, onChange }: { style: ChartStyle; onChange: (s: ChartStyle) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, []);
+  const set = (patch: Partial<ChartStyle>) => onChange({ ...style, ...patch });
+  const color = (label: string, key: keyof ChartStyle) => (
+    <label className="style-row">
+      <span>{label}</span>
+      <input type="color" value={style[key] as string} onChange={(e) => set({ [key]: e.target.value })} />
+    </label>
+  );
+  return (
+    <div className="ind-menu" ref={ref}>
+      <button onClick={() => setOpen((o) => !o)}>Chart style ▾</button>
+      {open && (
+        <div className="menu style-menu">
+          <label className="style-row">
+            <span>Type</span>
+            <select value={style.type} onChange={(e) => set({ type: e.target.value as CandleStyle })}>
+              {(Object.keys(STYLE_LABELS) as CandleStyle[]).map((k) => (
+                <option key={k} value={k}>
+                  {STYLE_LABELS[k]}
+                </option>
+              ))}
+            </select>
+          </label>
+          {color('Up candles', 'up')}
+          {color('Down candles', 'down')}
+          {color('Up wicks', 'wickUp')}
+          {color('Down wicks', 'wickDown')}
+          {color('Background', 'bg')}
+          <label className="style-row">
+            <span>Grid</span>
+            <span>
+              <input type="checkbox" checked={style.grid} onChange={(e) => set({ grid: e.target.checked })} />{' '}
+              <input type="color" value={style.gridColor} onChange={(e) => set({ gridColor: e.target.value })} disabled={!style.grid} />
+            </span>
+          </label>
+          <div className="muted small">Presets</div>
+          <div className="presets">
+            {STYLE_PRESETS.map((p) => (
+              <button key={p.name} onClick={() => onChange({ ...DEFAULT_STYLE, ...p.style, type: style.type })}>
+                <span className="sw" style={{ background: p.style.up ?? DEFAULT_STYLE.up }} />
+                <span className="sw" style={{ background: p.style.down ?? DEFAULT_STYLE.down }} /> {p.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

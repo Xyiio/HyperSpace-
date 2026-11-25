@@ -1,11 +1,12 @@
-// Drawing tools: trend line, horizontal line, rectangle, Fibonacci retracement.
-// Points are stored as (time ms, price) so drawings survive zoom, interval changes and reloads.
+// Drawing tools: trend line, horizontal line, rectangle, Fib retracement, freehand pen, text box,
+// and up/down arrow markers. Points are stored as (time ms, price) so drawings survive zoom,
+// interval changes and reloads.
 import { BasePrimitive, TimeMapper } from './primitives';
 import type { IPrimitivePaneRenderer } from 'lightweight-charts';
 
 type Target = Parameters<IPrimitivePaneRenderer['draw']>[0];
 
-export type DrawingKind = 'trend' | 'hline' | 'rect' | 'fib';
+export type DrawingKind = 'trend' | 'hline' | 'rect' | 'fib' | 'pen' | 'text' | 'arrowUp' | 'arrowDown';
 export interface Pt {
   t: number;
   p: number;
@@ -14,16 +15,27 @@ export interface Drawing {
   id: string;
   kind: DrawingKind;
   a: Pt;
-  b: Pt; // equals a for hline
+  b: Pt; // equals a for one-point drawings
   color: string;
+  pts?: Pt[]; // freehand path
+  text?: string; // text box contents
 }
 
-export const DRAWING_INFO: Record<DrawingKind, { label: string; points: 1 | 2; key: string }> = {
-  trend: { label: 'Trend line', points: 2, key: 'T' },
-  hline: { label: 'Horizontal line', points: 1, key: 'H' },
-  rect: { label: 'Rectangle', points: 2, key: 'R' },
-  fib: { label: 'Fib retracement', points: 2, key: 'F' },
+/** How a drawing is placed: one click, two clicks, or press-and-drag. */
+export type PlaceMode = 'one' | 'two' | 'drag';
+
+export const DRAWING_INFO: Record<DrawingKind, { label: string; icon: string; place: PlaceMode; key: string }> = {
+  trend: { label: 'Trend line', icon: '╱', place: 'two', key: 'T' },
+  hline: { label: 'Horizontal line', icon: '─', place: 'one', key: 'H' },
+  rect: { label: 'Rectangle', icon: '▭', place: 'two', key: 'R' },
+  fib: { label: 'Fib retracement', icon: 'Fib', place: 'two', key: 'F' },
+  pen: { label: 'Freehand pen', icon: '✎', place: 'drag', key: 'P' },
+  text: { label: 'Text box', icon: 'Aa', place: 'one', key: 'X' },
+  arrowUp: { label: 'Arrow up', icon: '▲', place: 'one', key: 'U' },
+  arrowDown: { label: 'Arrow down', icon: '▼', place: 'one', key: 'D' },
 };
+
+export const DRAW_COLORS = ['#f5c542', '#26c6da', '#a78bfa', '#f472b6', '#34d399', '#f87171', '#e5e7eb', '#fb923c'];
 
 export const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
 
@@ -56,14 +68,32 @@ function segDist(px: number, py: number, x1: number, y1: number, x2: number, y2:
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
+const FONT = '12px system-ui, -apple-system, "Segoe UI", sans-serif';
+const MONO = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+const TEXT_PAD = 6;
+const LINE_H = 16;
+
 export class DrawingsPrimitive extends BasePrimitive {
   drawings: Drawing[] = [];
   draft: Drawing | null = null; // being placed, follows the cursor
   selected: string | null = null;
   decimals = 2;
+  private measure: CanvasRenderingContext2D | null = null;
 
   constructor(mapper: TimeMapper) {
     super(mapper, 'top');
+  }
+
+  /** Width and height of a text box, in pixels. */
+  textBox(text: string) {
+    if (!this.measure) this.measure = document.createElement('canvas').getContext('2d');
+    const lines = (text || ' ').split('\n');
+    let w = 0;
+    if (this.measure) {
+      this.measure.font = FONT;
+      for (const l of lines) w = Math.max(w, this.measure.measureText(l).width);
+    }
+    return { w: w + TEXT_PAD * 2, h: lines.length * LINE_H + TEXT_PAD };
   }
 
   /** Id of the drawing under a pane point, if any (8px tolerance). */
@@ -74,15 +104,40 @@ export class DrawingsPrimitive extends BasePrimitive {
       const g = this.geom(d);
       if (!g) continue;
       const { x1, y1, x2, y2 } = g;
-      if (d.kind === 'hline' && Math.abs(py - y1) <= tol) return d.id;
-      if (d.kind === 'trend' && segDist(px, py, x1, y1, x2, y2) <= tol) return d.id;
-      if (d.kind === 'rect' && px >= Math.min(x1, x2) - tol && px <= Math.max(x1, x2) + tol && py >= Math.min(y1, y2) - tol && py <= Math.max(y1, y2) + tol)
-        return d.id;
-      if (d.kind === 'fib' && px >= Math.min(x1, x2) - tol) {
-        for (const lv of FIB_LEVELS) {
-          const y = this.y(d.b.p + (d.a.p - d.b.p) * lv);
-          if (y !== null && Math.abs(py - y) <= tol) return d.id;
+      switch (d.kind) {
+        case 'hline':
+          if (Math.abs(py - y1) <= tol) return d.id;
+          break;
+        case 'trend':
+          if (segDist(px, py, x1, y1, x2, y2) <= tol) return d.id;
+          break;
+        case 'rect':
+          if (px >= Math.min(x1, x2) - tol && px <= Math.max(x1, x2) + tol && py >= Math.min(y1, y2) - tol && py <= Math.max(y1, y2) + tol) return d.id;
+          break;
+        case 'fib':
+          if (px >= Math.min(x1, x2) - tol) {
+            for (const lv of FIB_LEVELS) {
+              const y = this.y(d.b.p + (d.a.p - d.b.p) * lv);
+              if (y !== null && Math.abs(py - y) <= tol) return d.id;
+            }
+          }
+          break;
+        case 'pen': {
+          const pts = this.path(d);
+          for (let j = 1; j < pts.length; j++) if (segDist(px, py, pts[j - 1][0], pts[j - 1][1], pts[j][0], pts[j][1]) <= tol) return d.id;
+          break;
         }
+        case 'text': {
+          const { w, h } = this.textBox(d.text ?? '');
+          if (px >= x1 - 2 && px <= x1 + w + 2 && py >= y1 - 2 && py <= y1 + h + 2) return d.id;
+          break;
+        }
+        case 'arrowUp':
+          if (Math.abs(px - x1) <= 10 && py >= y1 - 4 && py <= y1 + 26) return d.id;
+          break;
+        case 'arrowDown':
+          if (Math.abs(px - x1) <= 10 && py <= y1 + 4 && py >= y1 - 26) return d.id;
+          break;
       }
     }
     return null;
@@ -97,11 +152,22 @@ export class DrawingsPrimitive extends BasePrimitive {
     return { x1, y1, x2, y2 };
   }
 
+  private path(d: Drawing): [number, number][] {
+    const out: [number, number][] = [];
+    for (const pt of d.pts ?? []) {
+      const x = this.x(pt.t);
+      const y = this.y(pt.p);
+      if (x !== null && y !== null) out.push([x, y]);
+    }
+    return out;
+  }
+
   protected draw(target: Target) {
     const all = this.draft ? [...this.drawings, this.draft] : this.drawings;
     if (all.length === 0) return;
     target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
-      ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       for (const d of all) {
         const g = this.geom(d);
         if (!g) continue;
@@ -111,6 +177,11 @@ export class DrawingsPrimitive extends BasePrimitive {
         ctx.fillStyle = d.color;
         ctx.lineWidth = sel ? 2 : 1.25;
         ctx.setLineDash([]);
+        ctx.font = MONO;
+        let handles: [number, number][] = [
+          [x1, y1],
+          [x2, y2],
+        ];
         if (d.kind === 'trend') {
           ctx.beginPath();
           ctx.moveTo(x1, y1);
@@ -122,6 +193,7 @@ export class DrawingsPrimitive extends BasePrimitive {
           ctx.lineTo(mediaSize.width, y1);
           ctx.stroke();
           ctx.fillText(d.a.p.toFixed(this.decimals), 6, y1 - 4);
+          handles = [[x1, y1]];
         } else if (d.kind === 'rect') {
           ctx.globalAlpha = 0.12;
           ctx.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
@@ -137,9 +209,7 @@ export class DrawingsPrimitive extends BasePrimitive {
           ctx.stroke();
           ctx.setLineDash([]);
           // When the levels are packed tightly, label only the ends so the text stays readable.
-          const yA = this.y(d.a.p);
-          const yB = this.y(d.b.p);
-          const tight = yA !== null && yB !== null && Math.abs(yA - yB) < 90;
+          const tight = Math.abs(y1 - y2) < 90;
           for (const lv of FIB_LEVELS) {
             const price = d.b.p + (d.a.p - d.b.p) * lv;
             const y = this.y(price);
@@ -152,13 +222,50 @@ export class DrawingsPrimitive extends BasePrimitive {
             if (!tight || lv === 0 || lv === 1) ctx.fillText(`${lv} (${price.toFixed(this.decimals)})`, left + 4, y - 3);
           }
           ctx.globalAlpha = 1;
+        } else if (d.kind === 'pen') {
+          const pts = this.path(d);
+          if (pts.length > 1) {
+            ctx.lineWidth = sel ? 2.5 : 2;
+            ctx.beginPath();
+            ctx.moveTo(pts[0][0], pts[0][1]);
+            for (const [x, y] of pts.slice(1)) ctx.lineTo(x, y);
+            ctx.stroke();
+          }
+          handles = pts.length ? [pts[0], pts[pts.length - 1]] : [];
+        } else if (d.kind === 'text') {
+          const { w, h } = this.textBox(d.text ?? '');
+          ctx.fillStyle = 'rgba(11,15,20,0.85)';
+          ctx.fillRect(x1, y1, w, h);
+          ctx.strokeRect(x1, y1, w, h);
+          ctx.fillStyle = d.color;
+          ctx.font = FONT;
+          ctx.textBaseline = 'top';
+          (d.text || '').split('\n').forEach((line, i) => ctx.fillText(line, x1 + TEXT_PAD, y1 + TEXT_PAD / 2 + 2 + i * LINE_H));
+          ctx.textBaseline = 'alphabetic';
+          handles = [[x1, y1]];
+        } else if (d.kind === 'arrowUp' || d.kind === 'arrowDown') {
+          // The tip sits on the clicked price; the arrow points at it from below (up) or above (down).
+          const s = d.kind === 'arrowUp' ? 1 : -1;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x1 - 8, y1 + s * 10);
+          ctx.lineTo(x1 - 3, y1 + s * 10);
+          ctx.lineTo(x1 - 3, y1 + s * 22);
+          ctx.lineTo(x1 + 3, y1 + s * 22);
+          ctx.lineTo(x1 + 3, y1 + s * 10);
+          ctx.lineTo(x1 + 8, y1 + s * 10);
+          ctx.closePath();
+          ctx.fill();
+          handles = sel ? [[x1, y1]] : [];
         }
         if (sel) {
-          for (const [hx, hy] of d.kind === 'hline' ? [[x1, y1]] : [[x1, y1], [x2, y2]]) {
+          for (const [hx, hy] of handles) {
             ctx.beginPath();
             ctx.arc(hx, hy, 3.5, 0, Math.PI * 2);
             ctx.fillStyle = '#0b0f14';
             ctx.fill();
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = d.color;
             ctx.stroke();
           }
         }

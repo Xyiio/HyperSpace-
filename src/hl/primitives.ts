@@ -125,7 +125,8 @@ export class HeatmapPrimitive extends BasePrimitive {
     const now = Date.now();
     for (let i = 0; i < this.snapshots.length; i++) {
       const s = this.snapshots[i];
-      const next = this.snapshots[i + 1]?.t ?? Math.max(now, s.t + 1000);
+      // A column lasts until the next snapshot, but never across a gap (the tab was closed).
+      const next = Math.min(this.snapshots[i + 1]?.t ?? Math.max(now, s.t + 1000), s.t + 15_000);
       const x0 = this.x(s.t);
       const x1 = this.x(next);
       if (x0 === null || x1 === null) continue;
