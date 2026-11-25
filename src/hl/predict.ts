@@ -128,9 +128,15 @@ export class GhostCandlePrimitive extends BasePrimitive {
     const yl = this.y(p.l);
     if (x === null || xPrev === null || yo === null || yc === null || yh === null || yl === null) return;
     const spacing = Math.max(3, x - xPrev);
-    const half = Math.max(3, spacing * 0.4);
+    const half = Math.max(4, spacing * 0.4);
     const col = p.c >= p.o ? this.up : this.down;
-    target.useMediaCoordinateSpace(({ context: ctx }) => {
+    target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+      // A faint band marks the predicted slot so the candle stands apart from the live heatmap.
+      const band = Math.max(half * 2 + 6, spacing);
+      ctx.fillStyle = 'rgba(11,15,20,0.75)';
+      ctx.fillRect(x - band / 2, 0, band, mediaSize.height);
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      ctx.fillRect(x - band / 2, 0, band, mediaSize.height);
       ctx.strokeStyle = withAlpha(col, 0.75);
       ctx.lineWidth = 1;
       ctx.beginPath();
