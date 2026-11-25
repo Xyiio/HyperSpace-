@@ -5,8 +5,7 @@ import { WS_URL } from './api';
 export type Subscription =
   | { type: 'l2Book'; coin: string; nSigFigs?: number | null }
   | { type: 'trades'; coin: string }
-  | { type: 'candle'; coin: string; interval: string }
-  | { type: 'allMids' };
+  | { type: 'candle'; coin: string; interval: string };
 
 type Handler = (data: any) => void;
 
@@ -19,8 +18,6 @@ function subKey(s: Subscription): string {
       return `trades:${s.coin}`;
     case 'candle':
       return `candle:${s.coin}:${s.interval}`;
-    case 'allMids':
-      return 'allMids';
   }
 }
 
@@ -32,8 +29,6 @@ function msgKey(channel: string, data: any): string | null {
       return Array.isArray(data) && data.length ? `trades:${data[0].coin}` : null;
     case 'candle':
       return `candle:${data.s}:${data.i}`;
-    case 'allMids':
-      return 'allMids';
     default:
       return null; // subscriptionResponse, pong, error
   }

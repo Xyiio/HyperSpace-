@@ -4,7 +4,8 @@ A Hyperliquid-native charting and trading terminal. It reads order flow straight
 
 ## What works today (phase 0)
 
-- **Live candles** for every Hyperliquid perp, 1m to 1d (`candleSnapshot` + `candle` stream).
+- **Every perp market on Hyperliquid**, including tokenized stocks, indices, commodities and FX on HIP-3 builder-deployed dexes (for example `xyz:TSLA`, `xyz:GOLD`, `xyz:EUR`). Markets are discovered at load time from `perpDexs`, so new HIP-3 dexes and listings appear automatically; delisted ones are hidden.
+- **Live candles**, 1m to 1d (`candleSnapshot` + `candle` stream).
 - **Order-book heatmap** drawn behind the candles from `l2Book` snapshots, one column per second. Hyperliquid only serves the current book, so the heatmap builds while the tab is open. Grouping (tick, 5/4/3 significant figures) is adjustable.
 - **Large-trade bubbles** on the chart and a trade tape that shows the taker's wallet. Click any wallet to open its verified PnL.
 - **Book ladder.** Click a level, or anywhere on the chart, to stage an order at that price.

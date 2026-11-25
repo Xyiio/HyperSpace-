@@ -25,7 +25,7 @@ const state = { assetPositions: [{ type: 'oneWay', position: { coin: 'BTC', szi:
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   await page.route('https://api.hyperliquid.xyz/info', async (route) => {
     const b = JSON.parse(route.request().postData());
-    const body = { metaAndAssetCtxs: meta, candleSnapshot: candles, portfolio, userFills: fills, clearinghouseState: state }[b.type];
+    const body = { perpDexs: [null], metaAndAssetCtxs: meta, candleSnapshot: candles, portfolio, userFills: fills, clearinghouseState: state }[b.type];
     await route.fulfill({ json: body ?? null, headers: { 'access-control-allow-origin': '*' } });
   });
   await page.routeWebSocket('wss://api.hyperliquid.xyz/ws', (ws) => {

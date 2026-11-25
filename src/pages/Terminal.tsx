@@ -29,7 +29,7 @@ interface Props {
 }
 
 export function Terminal({ markets, coin, overlay, onRoute }: Props) {
-  const market = useMemo(() => markets.find((m) => m.name === coin) ?? markets[0], [markets, coin]);
+  const market = useMemo(() => markets.find((m) => m.name === coin) ?? markets.find((m) => m.name.toLowerCase() === coin.toLowerCase()) ?? markets[0], [markets, coin]);
   const [interval, setTf] = useState<Interval>('1m');
   const [nSigFigs, setNSigFigs] = useState<number | null>(4);
   const [heatmap, setHeatmap] = useState(true);

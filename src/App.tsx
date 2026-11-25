@@ -13,7 +13,7 @@ function parse(hash: string): Route {
     return { page: 'wallet', address: a && isAddress(a) ? a : null };
   }
   const w = new URLSearchParams(query ?? '').get('wallet');
-  return { page: 'trade', coin: parts[1]?.toUpperCase() ?? 'BTC', wallet: w && isAddress(w) ? w.toLowerCase() : null };
+  return { page: 'trade', coin: parts[1] ? decodeURIComponent(parts[1]) : 'BTC', wallet: w && isAddress(w) ? w.toLowerCase() : null };
 }
 
 export default function App() {

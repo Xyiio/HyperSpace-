@@ -29,7 +29,7 @@ export function OrderTicket({ market, price, onPrice }: { market: Market; price:
 
   return (
     <div className="ticket">
-      <div className="ticket-head">Order ticket · {market.name}-PERP</div>
+      <div className="ticket-head">Order ticket · {market.name}</div>
       <div className="seg">
         <button className={side === 'buy' ? 'on buy' : ''} onClick={() => setSide('buy')}>Buy / Long</button>
         <button className={side === 'sell' ? 'on sell' : ''} onClick={() => setSide('sell')}>Sell / Short</button>

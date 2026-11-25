@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { INTERVALS, type Interval, type Market } from '../hl/api';
+import { useEffect, useMemo, useState } from 'react';
+import { INTERVALS, type Interval, type Market, type Trade } from '../hl/api';
 import { hlSocket, type SocketStatus } from '../hl/ws';
 import { fmtCompact, priceDecimals } from '../hl/stats';
 
@@ -12,23 +12,33 @@ interface Props {
 }
 
 export function MarketBar({ markets, market, onMarket, interval, onInterval }: Props) {
-  const [mid, setMid] = useState<number | null>(null);
+  const [last, setLast] = useState<number | null>(null);
   const [status, setStatus] = useState<SocketStatus>('closed');
+  const [query, setQuery] = useState('');
 
   useEffect(() => hlSocket.onStatus(setStatus), []);
+  // Last trade price works the same on the main dex and on HIP-3 dexes.
   useEffect(() => {
-    setMid(null);
-    let last = 0;
-    return hlSocket.subscribe({ type: 'allMids' }, (d: { mids: Record<string, string> }) => {
-      const now = Date.now();
-      if (now - last < 500) return;
-      last = now;
-      const m = d.mids?.[market.name];
-      if (m) setMid(Number(m));
+    setLast(null);
+    return hlSocket.subscribe({ type: 'trades', coin: market.name }, (ts: Trade[]) => {
+      const t = ts[ts.length - 1];
+      if (t) setLast(Number(t.px));
     });
   }, [market.name]);
 
-  const px = mid ?? Number(market.ctx.markPx);
+  // Group markets by dex: crypto perps first, then each HIP-3 dex (stocks, indices, commodities, FX).
+  const groups = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const map = new Map<string, Market[]>();
+    for (const m of markets) {
+      if (q && !m.name.toLowerCase().includes(q) && !m.dexLabel.toLowerCase().includes(q)) continue;
+      const label = m.dex ? `${m.dexLabel} (HIP-3: stocks, commodities, FX)` : 'Hyperliquid crypto perps';
+      map.set(label, [...(map.get(label) ?? []), m]);
+    }
+    return [...map.entries()];
+  }, [markets, query]);
+
+  const px = last ?? Number(market.ctx.markPx);
   const prev = Number(market.ctx.prevDayPx);
   const chg = ((px - prev) / prev) * 100;
   const dec = priceDecimals(px, market.szDecimals);
@@ -36,13 +46,22 @@ export function MarketBar({ markets, market, onMarket, interval, onInterval }: P
 
   return (
     <div className="market-bar">
-      <select className="coin-select" value={market.name} onChange={(e) => onMarket(e.target.value)}>
-        {markets.map((m) => (
-          <option key={m.name} value={m.name}>
-            {m.name}-PERP
-          </option>
-        ))}
-      </select>
+      <div className="picker">
+        <input className="coin-search" placeholder="Search TSLA, GOLD, BTC…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <select className="coin-select" value={market.name} onChange={(e) => onMarket(e.target.value)}>
+          {!groups.some(([, ms]) => ms.includes(market)) && <option value={market.name}>{market.name}</option>}
+          {groups.map(([label, ms]) => (
+            <optgroup key={label} label={label}>
+              {ms.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </div>
+      {market.dex && <span className="badge" title="HIP-3 builder-deployed market">{market.dexLabel}</span>}
       <div className="stat big">{px.toFixed(dec)}</div>
       <div className={`stat ${chg >= 0 ? 'up' : 'down'}`}>
         <small>24h</small>

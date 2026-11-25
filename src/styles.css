@@ -145,3 +145,6 @@ th:first-child, td:first-child { text-align: left; }
   .top .muted { display: none; }
   .chart-wrap { min-height: 380px; }
 }
+.picker { display: flex; gap: 6px; align-items: center; }
+.coin-search { width: 170px; }
+.badge { font-family: system-ui, sans-serif; font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 1px 8px; }

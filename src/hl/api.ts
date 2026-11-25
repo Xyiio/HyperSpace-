@@ -38,15 +38,49 @@ export interface PerpAssetCtx {
 
 export interface Market extends PerpAsset {
   index: number; // asset id used in order actions
+  dex: string; // '' = Hyperliquid's main perp dex; otherwise a HIP-3 builder-deployed dex
+  dexLabel: string; // human name of the dex
+  symbol: string; // name without the dex prefix, e.g. TSLA for xyz:TSLA
   ctx: PerpAssetCtx;
 }
 
+interface PerpDex {
+  name: string;
+  fullName: string;
+}
+
+// Asset ids: main dex = index; HIP-3 dex number i (1-based in perpDexs) = 110000 + (i - 1) * 10000 + index.
+// Mirrors hyperliquid-python-sdk info.py.
+const dexOffset = (i: number) => (i === 0 ? 0 : 110_000 + (i - 1) * 10_000);
+
+/**
+ * Every perp market on Hyperliquid: the main crypto dex plus every HIP-3 builder-deployed dex,
+ * which is where tokenized stocks, indices, commodities and FX trade (e.g. xyz:TSLA, xyz:GOLD).
+ */
 export async function fetchMarkets(signal?: AbortSignal): Promise<Market[]> {
-  const [meta, ctxs] = await info<[{ universe: PerpAsset[] }, PerpAssetCtx[]]>({ type: 'metaAndAssetCtxs' }, signal);
-  return meta.universe
-    .map((a, i) => ({ ...a, index: i, ctx: ctxs[i] }))
-    .filter((m) => !m.isDelisted && m.ctx)
-    .sort((a, b) => Number(b.ctx.dayNtlVlm) - Number(a.ctx.dayNtlVlm));
+  const dexes = await info<(PerpDex | null)[]>({ type: 'perpDexs' }, signal);
+  const lists = await Promise.all(
+    dexes.map(async (d, i) => {
+      const dex = d?.name ?? '';
+      try {
+        const [meta, ctxs] = await info<[{ universe: PerpAsset[] }, PerpAssetCtx[]]>({ type: 'metaAndAssetCtxs', dex }, signal);
+        return meta.universe
+          .map((a, j) => ({
+            ...a,
+            index: dexOffset(i) + j,
+            dex,
+            dexLabel: d ? d.fullName || d.name : 'Hyperliquid',
+            symbol: a.name.includes(':') ? a.name.split(':')[1] : a.name,
+            ctx: ctxs[j],
+          }))
+          .filter((m) => !m.isDelisted && m.ctx);
+      } catch (e) {
+        if (i === 0) throw e; // the main dex is required; a broken HIP-3 dex is skipped
+        return [];
+      }
+    }),
+  );
+  return lists.map((l) => l.sort((a, b) => Number(b.ctx.dayNtlVlm) - Number(a.ctx.dayNtlVlm))).flat();
 }
 
 // ---------- Candles ----------
