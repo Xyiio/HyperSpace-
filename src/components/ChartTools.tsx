@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { INDICATOR_INFO, PALETTE, shortName, type IndicatorConfig, type IndicatorKind } from '../hl/indicators';
+import { INDICATOR_INFO, PALETTE, shortName, type BuiltinKind, type IndicatorConfig } from '../hl/indicators';
+import { useScriptLibrary, type SavedScript } from '../script/library';
+import { run } from '../script/hyperscript';
 import { DRAWING_INFO, DRAW_COLORS, type DrawingKind } from '../hl/drawings';
 import { DEFAULT_STYLE, STYLE_LABELS, STYLE_PRESETS, type CandleStyle, type ChartStyle } from '../hl/chartStyle';
 
@@ -24,7 +26,7 @@ export function usePersistent<T>(key: string, initial: T) {
 }
 
 const KEY = 'hs.indicators';
-const DEFAULTS: IndicatorConfig[] = [
+export const DEFAULT_INDICATORS: IndicatorConfig[] = [
   { id: 'd-ema50', kind: 'ema', params: [50], color: PALETTE[0] },
   { id: 'd-ema200', kind: 'ema', params: [200], color: PALETTE[1] },
 ];
@@ -33,9 +35,9 @@ export function useIndicators() {
   const [list, setList] = useState<IndicatorConfig[]>(() => {
     try {
       const raw = localStorage.getItem(KEY);
-      return raw ? (JSON.parse(raw) as IndicatorConfig[]) : DEFAULTS;
+      return raw ? (JSON.parse(raw) as IndicatorConfig[]) : DEFAULT_INDICATORS;
     } catch {
-      return DEFAULTS;
+      return DEFAULT_INDICATORS;
     }
   });
   useEffect(() => {
@@ -82,10 +84,21 @@ export function ChartTools({ indicators, onIndicators, tool, onTool, onClearDraw
     return () => window.removeEventListener('keydown', onKey);
   }, [tool, onTool]);
 
-  const add = (kind: IndicatorKind) => {
+  const [scripts] = useScriptLibrary();
+  const nextColor = () => {
     const used = new Set(indicators.map((i) => i.color));
-    const color = PALETTE.find((c) => !used.has(c)) ?? PALETTE[indicators.length % PALETTE.length];
-    onIndicators([...indicators, { id: crypto.randomUUID(), kind, params: INDICATOR_INFO[kind].params.map((p) => p.def), color }]);
+    return PALETTE.find((c) => !used.has(c)) ?? PALETTE[indicators.length % PALETTE.length];
+  };
+  const add = (kind: BuiltinKind) =>
+    onIndicators([...indicators, { id: crypto.randomUUID(), kind, params: INDICATOR_INFO[kind].params.map((p) => p.def), color: nextColor() }]);
+  const addScript = (sc: SavedScript) =>
+    onIndicators([...indicators, { id: crypto.randomUUID(), kind: 'script', params: [], color: nextColor(), name: sc.name, code: sc.code, scriptId: sc.id, inputs: {} }]);
+  const scriptInputs = (code: string) => {
+    try {
+      return run(code, []).inputs;
+    } catch {
+      return [];
+    }
   };
   const update = (id: string, i: number, v: number) =>
     onIndicators(indicators.map((c) => (c.id === id ? { ...c, params: c.params.map((p, j) => (j === i ? v : p)) } : c)));
@@ -101,8 +114,25 @@ export function ChartTools({ indicators, onIndicators, tool, onTool, onClearDraw
             {indicators.map((c) => (
               <div key={c.id} className="ind-row">
                 <span className="sw" style={{ background: c.color }} />
-                <span className="ind-name">{c.kind.toUpperCase()}</span>
-                {INDICATOR_INFO[c.kind].params.map((p, i) => (
+                <span className={c.kind === 'script' ? 'ind-name script' : 'ind-name'} title={shortName(c)}>
+                  {c.kind === 'script' ? c.name : c.kind.toUpperCase()}
+                </span>
+                {c.kind === 'script' &&
+                  scriptInputs(c.code ?? '').map((inp) => (
+                    <input
+                      key={inp.name}
+                      className="num tiny"
+                      title={inp.name}
+                      type="number"
+                      value={c.inputs?.[inp.name] ?? inp.def}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (Number.isFinite(v)) onIndicators(indicators.map((x) => (x.id === c.id ? { ...x, inputs: { ...x.inputs, [inp.name]: v } } : x)));
+                      }}
+                    />
+                  ))}
+                {c.kind !== 'script' &&
+                  INDICATOR_INFO[c.kind].params.map((p, i) => (
                   <input
                     key={p.name}
                     className="num tiny"
@@ -123,11 +153,20 @@ export function ChartTools({ indicators, onIndicators, tool, onTool, onClearDraw
               </div>
             ))}
             <div className="muted small">Add</div>
-            {(Object.keys(INDICATOR_INFO) as IndicatorKind[]).map((k) => (
+            {(Object.keys(INDICATOR_INFO) as BuiltinKind[]).map((k) => (
               <button key={k} className="ind-add" onClick={() => add(k)}>
                 + {INDICATOR_INFO[k].label}
               </button>
             ))}
+            <div className="muted small">My HyperScripts</div>
+            {scripts.map((sc) => (
+              <button key={sc.id} className="ind-add" onClick={() => addScript(sc)}>
+                + {sc.name} {sc.origin === 'market' && <span className="muted small">· market</span>}
+              </button>
+            ))}
+            <a className="ind-add small" href="#/studio">
+              {scripts.length ? 'Open the Studio to write or edit scripts →' : 'Write your own in the Studio, or install one from the Market →'}
+            </a>
           </div>
         )}
       </div>

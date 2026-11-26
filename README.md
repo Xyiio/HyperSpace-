@@ -77,3 +77,12 @@ Setup:
 4. In `.env.local` set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (the public anon key only; the service_role key must never reach the browser).
 
 Without those env vars the Ideas page shows a "not connected" note and the rest of the app works normally. Tables are read-only to the public through row-level security; all writes go through the edge functions after the signature is verified.
+
+## Creator studio, marketplace, leaderboard and community
+
+- **HyperScript** (`src/script/hyperscript.ts`): HyperSpace's indicator language. Scripts are parsed and evaluated over whole price series in a sandbox. They see only candles, have no loops and cannot reach the page, wallet or network, so marketplace scripts are safe to run. Open **Studio** (`#/studio`) to write one with a live preview and a function reference, then add it to the chart.
+- **Market** (`#/market`): HyperSpace originals work offline. Community indicators are published from the Studio with a wallet signature, either free or priced in HYPERSPACE. Paid listings show now, and buying opens at the token launch.
+- **Leaderboard** (`#/leaderboard`): top traders by PnL or ROI over 24h, 7d, 30d or all time, from Hyperliquid's leaderboard data. With Supabase connected, the `leaderboard` function caches a reduced copy for 10 minutes; without it, the browser downloads Hyperliquid's full file (about 40 MB).
+- **Community** (`#/community`): live chat channels plus the trade-ideas feed. Chat sign-in is one wallet signature that lasts 7 days.
+
+Backend for these: run `supabase db push` (this applies `0002_scripts_chat_leaderboard.sql`), then `supabase functions deploy publish-script chat-login chat-post leaderboard`.

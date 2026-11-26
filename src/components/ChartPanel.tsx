@@ -24,6 +24,7 @@ import { bollinger, ema, macd, rsi, sma, vwap, type Candle, type IndicatorConfig
 import { LiquidationPrimitive, LiquidationScanner, bucketLiquidations, niceStep, type LiqStats } from '../hl/liqmap';
 import { DRAWING_INFO, DRAW_COLORS, DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingKind, type Pt } from '../hl/drawings';
 import { isLight, withAlpha, type ChartStyle } from '../hl/chartStyle';
+import { run as runScript } from '../script/hyperscript';
 import { GhostCandlePrimitive, bookImbalance, predictNext, type Prediction } from '../hl/predict';
 import { VolumeProfilePrimitive, loadBookHistory, saveBookHistory, thinSnapshots, volumeProfile } from '../hl/profile';
 
@@ -99,6 +100,9 @@ export function ChartPanel({
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const scriptMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const [scriptError, setScriptError] = useState('');
+  const scriptErrorRef = useRef('');
   const mapperRef = useRef(new TimeMapper());
   const heatRef = useRef<HeatmapPrimitive | null>(null);
   const bubblesRef = useRef<TradeBubblesPrimitive | null>(null);
@@ -169,6 +173,7 @@ export function ChartPanel({
     series.attachPrimitive(heat);
     series.attachPrimitive(bubbles);
     markersRef.current = createSeriesMarkers(series, []);
+    scriptMarkersRef.current = createSeriesMarkers(series, []);
     const draw = new DrawingsPrimitive(mapperRef.current);
     series.attachPrimitive(draw);
     const liq = new LiquidationPrimitive(mapperRef.current);
@@ -442,6 +447,7 @@ export function ChartPanel({
       chartRef.current = seriesRef.current = volRef.current = heatRef.current = bubblesRef.current = null;
       altRef.current = null;
       markersRef.current = null;
+      scriptMarkersRef.current = null;
     };
   }, []);
 
@@ -608,6 +614,29 @@ export function ChartPanel({
           line(pane, cfg.color, 2, 'MACD'),
           line(pane, '#94a3b8', 1, 'Signal'),
         );
+      } else if (cfg.kind === 'script' && cfg.code) {
+        // Run once on no data to learn the plots, then create a series for each.
+        let shape;
+        try {
+          shape = runScript(cfg.code, [], cfg.inputs);
+        } catch {
+          shape = null;
+        }
+        if (shape) {
+          const pane = shape.overlay ? 0 : nextPane++;
+          for (const pl of shape.plots) {
+            list.push(
+              pl.style === 'histogram'
+                ? chart.addSeries(HistogramSeries, { color: pl.color, priceLineVisible: false, lastValueVisible: false, title: pl.title }, pane)
+                : chart.addSeries(
+                    LineSeries,
+                    { color: pl.color, lineWidth: pl.width as 1 | 2 | 3 | 4, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, title: shape.overlay ? '' : pl.title },
+                    pane,
+                  ),
+            );
+          }
+          if (list[0]) for (const h of shape.hlines) list[0].createPriceLine({ price: h.value, color: h.color, lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: h.title });
+        }
       }
       map.set(cfg.id, list);
     }
@@ -636,9 +665,35 @@ export function ChartPanel({
     const closes = ks.map((k) => k.c);
     const time = (i: number) => (ks[i].t / 1000) as UTCTimestamp;
     const toLine = (vals: number[]) => vals.map((v, i) => (Number.isFinite(v) ? { time: time(i), value: v } : { time: time(i) }));
+    const shapeMarkers: SeriesMarker<Time>[] = [];
+    const errors: string[] = [];
     for (const cfg of indicatorsRef.current) {
       const list = indSeriesRef.current.get(cfg.id);
       if (!list) continue;
+      if (cfg.kind === 'script') {
+        try {
+          const outp = runScript(cfg.code ?? '', ks, cfg.inputs);
+          outp.plots.forEach((pl, i) => {
+            const s = list[i];
+            if (!s) return;
+            if (pl.style === 'histogram')
+              s.setData(Array.from(pl.values, (v, j) => (Number.isFinite(v) ? { time: time(j), value: v, color: withAlpha(pl.color, v >= 0 ? 0.7 : 0.4) } : { time: time(j) })));
+            else s.setData(toLine(Array.from(pl.values)));
+          });
+          for (const sh of outp.shapes)
+            for (const bi of sh.bars)
+              shapeMarkers.push({
+                time: time(bi),
+                position: sh.dir === 'up' ? 'belowBar' : 'aboveBar',
+                shape: sh.dir === 'up' ? 'arrowUp' : 'arrowDown',
+                color: sh.color,
+                text: sh.title,
+              });
+        } catch (e) {
+          errors.push(`${cfg.name ?? 'Script'}: ${(e as Error).message}`);
+        }
+        continue;
+      }
       const [a, b, c] = cfg.params;
       if (cfg.kind === 'sma') list[0].setData(toLine(sma(closes, a)));
       else if (cfg.kind === 'ema') list[0].setData(toLine(ema(closes, a)));
@@ -659,6 +714,13 @@ export function ChartPanel({
         list[1].setData(toLine(r.line));
         list[2].setData(toLine(r.signal));
       }
+    }
+    shapeMarkers.sort((x, y) => (x.time as number) - (y.time as number));
+    scriptMarkersRef.current?.setMarkers(shapeMarkers);
+    const err = errors.join(' · ');
+    if (err !== scriptErrorRef.current) {
+      scriptErrorRef.current = err;
+      setScriptError(err);
     }
   };
 
@@ -936,6 +998,7 @@ export function ChartPanel({
     <div className="chart-wrap">
       <div ref={hostRef} className="chart-host" />
       {status && <div className="chart-status">{status}</div>}
+      {scriptError && !status && <div className="chart-status error-text">{scriptError}</div>}
       {tool && (
         <div className="chart-tool-hint">
           {DRAWING_INFO[tool].label}: {hint} · Esc to cancel

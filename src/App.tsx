@@ -3,13 +3,21 @@ import { fetchMarkets, isAddress, type Market } from './hl/api';
 import { Terminal } from './pages/Terminal';
 import { Wallet } from './pages/Wallet';
 import { Ideas } from './pages/Ideas';
+import { Studio } from './pages/Studio';
+import { Market as MarketPage } from './pages/Market';
+import { Leaderboard } from './pages/Leaderboard';
+import { Community } from './pages/Community';
 import { WalletProvider } from './wallet/WalletContext';
 import { NetworkSwitch, WalletButton } from './components/WalletButton';
 import { NETWORK } from './hl/network';
 import { Logo } from './components/Logo';
 
 type Route = { page: 'trade'; coin: string; wallet: string | null } | { page: 'wallet'; address: string | null }
-  | { page: 'ideas'; coin: string | null };
+  | { page: 'ideas'; coin: string | null }
+  | { page: 'studio'; scriptId: string | null }
+  | { page: 'market' }
+  | { page: 'leaderboard' }
+  | { page: 'community'; tab: 'chat' | 'ideas'; channel: string };
 
 function parse(hash: string): Route {
   const [path, query] = hash.replace(/^#\/?/, '').split('?');
@@ -18,6 +26,10 @@ function parse(hash: string): Route {
     const a = parts[1]?.toLowerCase() ?? null;
     return { page: 'wallet', address: a && isAddress(a) ? a : null };
   }
+  if (parts[0] === 'studio') return { page: 'studio', scriptId: parts[1] ?? null };
+  if (parts[0] === 'market') return { page: 'market' };
+  if (parts[0] === 'leaderboard') return { page: 'leaderboard' };
+  if (parts[0] === 'community') return { page: 'community', tab: parts[1] === 'ideas' ? 'ideas' : 'chat', channel: parts[2] ?? 'general' };
   if (parts[0] === 'ideas') return { page: 'ideas', coin: parts[1] ? decodeURIComponent(parts[1]) : null };
   const w = new URLSearchParams(query ?? '').get('wallet');
   return { page: 'trade', coin: parts[1] ? decodeURIComponent(parts[1]) : 'BTC', wallet: w && isAddress(w) ? w.toLowerCase() : null };
@@ -63,11 +75,20 @@ export default function App() {
           <a className={route.page === 'trade' ? 'on' : ''} href={`#/trade/${route.page === 'trade' ? route.coin : 'BTC'}`}>
             Chart
           </a>
+          <a className={route.page === 'leaderboard' ? 'on' : ''} href="#/leaderboard">
+            Leaderboard
+          </a>
+          <a className={route.page === 'community' || route.page === 'ideas' ? 'on' : ''} href="#/community/chat/general">
+            Community
+          </a>
+          <a className={route.page === 'studio' ? 'on' : ''} href="#/studio">
+            Studio
+          </a>
+          <a className={route.page === 'market' ? 'on' : ''} href="#/market">
+            Market
+          </a>
           <a className={route.page === 'wallet' ? 'on' : ''} href="#/wallet">
             Verified PnL
-          </a>
-          <a className={route.page === 'ideas' ? 'on' : ''} href="#/ideas">
-            Ideas
           </a>
         </nav>
         <span className="muted small top-note">Live data from Hyperliquid {NETWORK}</span>
@@ -77,6 +98,14 @@ export default function App() {
       {error && <div className="error">{error}</div>}
       {route.page === 'wallet' ? (
         <Wallet address={route.address} onRoute={go} />
+      ) : route.page === 'studio' ? (
+        <Studio markets={markets ?? []} scriptId={route.scriptId} onRoute={go} />
+      ) : route.page === 'market' ? (
+        <MarketPage onRoute={go} />
+      ) : route.page === 'leaderboard' ? (
+        <Leaderboard onRoute={go} />
+      ) : route.page === 'community' ? (
+        <Community markets={markets ?? []} tab={route.tab} channel={route.channel} onRoute={go} />
       ) : route.page === 'ideas' ? (
         <Ideas markets={markets ?? []} coin={route.coin} onRoute={go} />
       ) : markets ? (

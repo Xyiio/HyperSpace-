@@ -122,16 +122,22 @@ export function vwap(candles: Candle[]): number[] {
 
 // ---------- Catalogue used by the UI ----------
 
-export type IndicatorKind = 'sma' | 'ema' | 'bb' | 'vwap' | 'rsi' | 'macd';
+export type BuiltinKind = 'sma' | 'ema' | 'bb' | 'vwap' | 'rsi' | 'macd';
+export type IndicatorKind = BuiltinKind | 'script';
 
 export interface IndicatorConfig {
   id: string;
   kind: IndicatorKind;
   params: number[];
   color: string;
+  // HyperScript indicators carry their own code and input values.
+  name?: string;
+  code?: string;
+  scriptId?: string;
+  inputs?: Record<string, number>;
 }
 
-export const INDICATOR_INFO: Record<IndicatorKind, { label: string; params: { name: string; def: number }[]; pane: boolean }> = {
+export const INDICATOR_INFO: Record<BuiltinKind, { label: string; params: { name: string; def: number }[]; pane: boolean }> = {
   sma: { label: 'Simple moving average', params: [{ name: 'Length', def: 20 }], pane: false },
   ema: { label: 'Exponential moving average', params: [{ name: 'Length', def: 50 }], pane: false },
   bb: { label: 'Bollinger Bands', params: [{ name: 'Length', def: 20 }, { name: 'Std dev', def: 2 }], pane: false },
@@ -143,4 +149,4 @@ export const INDICATOR_INFO: Record<IndicatorKind, { label: string; params: { na
 export const PALETTE = ['#f5c542', '#a78bfa', '#60a5fa', '#f472b6', '#fb923c', '#4ade80'];
 
 export const shortName = (c: IndicatorConfig) =>
-  `${c.kind.toUpperCase()}${c.params.length ? ` ${c.params.join(', ')}` : ''}`;
+  c.kind === 'script' ? (c.name ?? 'Script') : `${c.kind.toUpperCase()}${c.params.length ? ` ${c.params.join(', ')}` : ''}`;
