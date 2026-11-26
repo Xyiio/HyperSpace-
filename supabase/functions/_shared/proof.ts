@@ -22,12 +22,32 @@ export interface ProfileInput {
   twitter: string;
 }
 
-export type SignedKind = 'post-idea' | 'save-profile';
+export interface ScriptInput {
+  scriptId: string | null; // null publishes a new script; an id updates your existing one
+  name: string;
+  description: string;
+  priceHs: number; // 0 = free; otherwise a price in HYPERSPACE tokens
+  codeSha256: string; // hash of the code sent alongside, so the signature covers it
+}
+
+export interface ChatLoginInput {
+  purpose: 'chat';
+}
+
+export type SignedKind = 'post-idea' | 'save-profile' | 'publish-script' | 'chat-login';
+type Payload = IdeaInput | ProfileInput | ScriptInput | ChatLoginInput;
+
+const TITLES: Record<SignedKind, string> = {
+  'post-idea': 'post a trade idea',
+  'save-profile': 'update my profile',
+  'publish-script': 'publish an indicator',
+  'chat-login': 'sign in to chat',
+};
 
 /** The exact text the wallet signs. The JSON payload is on its own last line. */
-export function buildMessage(kind: SignedKind, address: string, issuedAt: number, payload: IdeaInput | ProfileInput): string {
+export function buildMessage(kind: SignedKind, address: string, issuedAt: number, payload: Payload): string {
   return [
-    `${APP_NAME}: ${kind === 'post-idea' ? 'post a trade idea' : 'update my profile'}`,
+    `${APP_NAME}: ${TITLES[kind]}`,
     '',
     'This signature proves you own this wallet. It does not send a transaction or cost gas.',
     '',
@@ -47,8 +67,7 @@ export interface ParsedMessage {
 export function parseMessage(message: string): ParsedMessage | null {
   const lines = message.split('\n');
   const head = lines[0];
-  const kind: SignedKind | null =
-    head === `${APP_NAME}: post a trade idea` ? 'post-idea' : head === `${APP_NAME}: update my profile` ? 'save-profile' : null;
+  const kind = ((Object.keys(TITLES) as SignedKind[]).find((k) => head === `${APP_NAME}: ${TITLES[k]}`) ?? null) as SignedKind | null;
   const get = (prefix: string) => lines.find((l) => l.startsWith(prefix))?.slice(prefix.length);
   const address = get('Wallet: ');
   const issued = get('Issued: ');
@@ -92,3 +111,38 @@ export function validateProfile(p: unknown): ProfileInput | string {
   if (twitter && !/^[A-Za-z0-9_]{1,15}$/.test(twitter)) return 'Invalid X handle.';
   return { displayName, bio, twitter };
 }
+
+export const MAX_SCRIPT_CHARS = 20_000;
+export const MAX_PRICE_HS = 1_000_000;
+
+export function validateScript(p: unknown): ScriptInput | string {
+  const o = p as Record<string, unknown>;
+  if (!o || typeof o !== 'object') return 'Missing script details.';
+  const name = String(o.name ?? '').trim();
+  if (name.length < 3 || name.length > 60) return 'Name must be 3 to 60 characters.';
+  const description = String(o.description ?? '').trim();
+  if (description.length < 10 || description.length > 1000) return 'Description must be 10 to 1,000 characters.';
+  const priceHs = Number(o.priceHs);
+  if (!Number.isFinite(priceHs) || priceHs < 0 || priceHs > MAX_PRICE_HS) return `Price must be 0 (free) to ${MAX_PRICE_HS.toLocaleString()} HYPERSPACE.`;
+  const codeSha256 = String(o.codeSha256 ?? '');
+  if (!/^[0-9a-f]{64}$/.test(codeSha256)) return 'Missing code hash.';
+  const scriptId = o.scriptId === null || o.scriptId === undefined ? null : String(o.scriptId);
+  if (scriptId !== null && !/^[0-9a-f-]{36}$/.test(scriptId)) return 'Invalid script id.';
+  return { scriptId, name, description, priceHs: Math.round(priceHs * 100) / 100, codeSha256 };
+}
+
+/** Hex SHA-256 of a string (works in browsers and Deno). */
+export async function sha256Hex(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export const CHAT_CHANNELS = [
+  { id: 'general', name: 'general', about: 'Anything HyperSpace and Hyperliquid' },
+  { id: 'btc', name: 'btc', about: 'Bitcoin' },
+  { id: 'eth', name: 'eth', about: 'Ethereum' },
+  { id: 'alts', name: 'alts', about: 'Everything else on the main dex' },
+  { id: 'stocks', name: 'stocks', about: 'Tokenized stocks, indices and commodities (HIP-3)' },
+  { id: 'scripts', name: 'scripts', about: 'HyperScript help and indicator ideas' },
+] as const;
+export const MAX_CHAT_CHARS = 500;
