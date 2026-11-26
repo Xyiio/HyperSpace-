@@ -90,7 +90,9 @@ export function Leaderboard({ onRoute }: { onRoute: (h: string) => void }) {
                   {t.roi >= 0 ? '+' : ''}
                   {(t.roi * 100).toFixed(1)}%
                 </td>
-                <td className="muted">{fmtCompact(t.volume)}</td>
+                <td className="muted" title={t.volume ? undefined : 'No trading volume in this window: the PnL likely comes from vault shares or other non-trading gains.'}>
+                  {t.volume ? fmtCompact(t.volume) : '– (no trading)'}
+                </td>
                 <td>
                   <button className="link small" onClick={() => onRoute(`#/trade/BTC?wallet=${t.address}`)}>
                     Fills on chart

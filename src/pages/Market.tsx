@@ -88,7 +88,7 @@ export function Market({ onRoute }: { onRoute: (h: string) => void }) {
         <h2>Indicator Market</h2>
         <p>
           Indicators written in HyperScript by HyperSpace traders. Free ones install in one click. Creators can also price an indicator in
-          HYPERSPACE tokens; buying opens when the token launches, with payment going straight to the creator's wallet. Every script runs in a
+          HYPERSPACE tokens; buying opens when the token launches (the plan is for payment to go straight to the creator's wallet). Every script runs in a
           sandbox that only sees price data. <a href="#/studio">Write your own →</a>
         </p>
       </div>
