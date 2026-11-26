@@ -5,8 +5,14 @@ import { BookLadder } from '../components/BookLadder';
 import { TradeTape } from '../components/TradeTape';
 import { OrderTicket } from '../components/OrderTicket';
 import { AccountPanel } from '../components/AccountPanel';
+import { ChartTools, useIndicators, usePersistent } from '../components/ChartTools';
+import { Watchlist } from '../components/Watchlist';
+import { DEFAULT_STYLE, type ChartStyle } from '../hl/chartStyle';
+import type { Prediction } from '../hl/predict';
+import type { DrawingKind } from '../hl/drawings';
+import type { LiqStats } from '../hl/liqmap';
 import { MarketBar } from '../components/MarketBar';
-import { shortAddr } from '../hl/stats';
+import { fmtCompact, shortAddr } from '../hl/stats';
 
 const GROUPINGS: { label: string; value: number | null }[] = [
   { label: 'Tick', value: null },
@@ -40,6 +46,18 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
   const [fills, setFills] = useState<Fill[] | null>(null);
   const [fillsMsg, setFillsMsg] = useState('');
   const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
+  const [indicators, setIndicators] = useIndicators();
+  const [tool, setTool] = useState<DrawingKind | null>(null);
+  const [clearDrawings, setClearDrawings] = useState(0);
+  const [liqMap, setLiqMap] = useState(false);
+  const [liqStats, setLiqStats] = useState<LiqStats | null>(null);
+  const [drawColor, setDrawColor] = usePersistent('hs.drawColor', '#f5c542');
+  const [chartStyle, setChartStyle] = usePersistent<ChartStyle>('hs.chartStyle', DEFAULT_STYLE);
+  const [volProfile, setVolProfile] = usePersistent('hs.volProfile', false);
+  const [predict, setPredict] = usePersistent('hs.prediction', false);
+  const [pred, setPred] = useState<Prediction | null>(null);
+  const [wlSide, setWlSide] = usePersistent<'left' | 'right'>('hs.watchlistSide', 'left');
+  const [wlOpen, setWlOpen] = usePersistent('hs.watchlistOpen', true);
 
   useEffect(() => {
     setBigTrade(defaultBigTrade(market));
@@ -67,12 +85,25 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
 
   const go = (c: string, o: string | null = overlay) => onRoute(`#/trade/${c}${o ? `?wallet=${o}` : ''}`);
 
+  const watchlist = (
+    <Watchlist markets={markets} current={market.name} onMarket={(c) => go(c)} side={wlSide} onSide={setWlSide} onClose={() => setWlOpen(false)} />
+  );
+
   return (
     <div className="terminal">
       <MarketBar markets={markets} market={market} onMarket={(c) => go(c)} interval={interval} onInterval={setTf} />
       <div className="toolbar">
         <label className="check">
           <input type="checkbox" checked={heatmap} onChange={(e) => setHeatmap(e.target.checked)} /> Book heatmap
+        </label>
+        <label className="check" title="Traded volume at each price over the loaded candles, split into buying and selling">
+          <input type="checkbox" checked={volProfile} onChange={(e) => setVolProfile(e.target.checked)} /> Volume profile
+        </label>
+        <label className="check" title="Experimental: a ghost candle from trend, RSI and live order-book imbalance">
+          <input type="checkbox" checked={predict} onChange={(e) => setPredict(e.target.checked)} /> Next-candle prediction
+        </label>
+        <label className="check" title="Estimated from wallets seen trading this market since you opened it">
+          <input type="checkbox" checked={liqMap} onChange={(e) => setLiqMap(e.target.checked)} /> Liquidation map
         </label>
         <label>
           Book grouping
@@ -104,10 +135,61 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
             </button>
           )}
         </form>
+        {!wlOpen && (
+          <button className="link" onClick={() => setWlOpen(true)}>
+            Show watchlist
+          </button>
+        )}
         {fillsMsg && <span className="muted">{fillsMsg}</span>}
+        {predict && pred && (
+          <span className="small pred-read" title="Score blends trend (EMA 9 vs 21), RSI stretch and resting bid vs ask size near the price. Not financial advice.">
+            Next candle: <span className={pred.c >= pred.o ? 'up' : 'down'}>{pred.c >= pred.o ? 'up' : 'down'}</span>, est. close {pred.c.toPrecision(6)} · confidence{' '}
+            {Math.round(Math.min(1, Math.abs(pred.score)) * 100)}%
+            {pred.hitRate !== null && (
+              <span className="muted">
+                {' '}
+                · direction right {Math.round(pred.hitRate * 100)}% of the last {pred.tested} bars
+              </span>
+            )}
+          </span>
+        )}
+        {liqStats && (
+          <span className="muted small">
+            Liq map: {liqStats.positions} positions from {liqStats.scanned} of {liqStats.wallets} wallets ·{' '}
+            <span className="down">longs {fmtCompact(liqStats.longs)}</span> · <span className="up">shorts {fmtCompact(liqStats.shorts)}</span>
+            {liqStats.below && (
+              <>
+                {' '}· biggest long cluster{' '}
+                <button className="link" onClick={() => setPrice(liqStats.below!.px)}>
+                  {liqStats.below.px} ({liqStats.below.pct.toFixed(1)}%, {fmtCompact(liqStats.below.usd)})
+                </button>
+              </>
+            )}
+            {liqStats.above && (
+              <>
+                {' '}· biggest short cluster{' '}
+                <button className="link" onClick={() => setPrice(liqStats.above!.px)}>
+                  {liqStats.above.px} (+{liqStats.above.pct.toFixed(1)}%, {fmtCompact(liqStats.above.usd)})
+                </button>
+              </>
+            )}
+          </span>
+        )}
       </div>
-      <div className="workspace">
+      <div className={`workspace${wlOpen ? ` wl-${wlSide}` : ''}`}>
+        {wlOpen && wlSide === 'left' && watchlist}
         <div className="main-col">
+          <ChartTools
+            indicators={indicators}
+            onIndicators={setIndicators}
+            tool={tool}
+            onTool={setTool}
+            onClearDrawings={() => setClearDrawings((n) => n + 1)}
+            drawColor={drawColor}
+            onDrawColor={setDrawColor}
+            chartStyle={chartStyle}
+            onChartStyle={setChartStyle}
+          />
           <ChartPanel
             market={market}
             interval={interval}
@@ -116,7 +198,18 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
             bigTradeUsd={bigTrade}
             walletFills={fills}
             openOrders={openOrders}
+            indicators={indicators}
+            tool={tool}
+            onToolDone={() => setTool(null)}
+            clearDrawings={clearDrawings}
+            liqMap={liqMap}
+            onLiqStats={setLiqStats}
             onPricePick={setPrice}
+            drawColor={drawColor}
+            chartStyle={chartStyle}
+            volProfile={volProfile}
+            prediction={predict}
+            onPrediction={setPred}
           />
           <p className="legend">
             <span className="sw bid" /> resting bids <span className="sw ask" /> resting asks, brighter = more size · bubbles = trades ≥ ${bigTrade.toLocaleString()} ·
@@ -127,10 +220,11 @@ export function Terminal({ markets, coin, overlay, onRoute }: Props) {
         <div className="side-col">
           <BookLadder market={market} nSigFigs={nSigFigs} onPricePick={setPrice} />
         </div>
-        <div className="side-col">
+        <div className="side-col ticket-col">
           <OrderTicket market={market} price={price} onPrice={setPrice} />
           <TradeTape market={market} bigTradeUsd={bigTrade} onWallet={(a) => onRoute(`#/wallet/${a}`)} />
         </div>
+        {wlOpen && wlSide === 'right' && watchlist}
       </div>
     </div>
   );

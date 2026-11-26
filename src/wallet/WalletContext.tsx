@@ -68,6 +68,8 @@ interface WalletState {
   enableTrading: () => Promise<void>;
   placeOrder: (order: OrderWire) => Promise<OrderResult>;
   cancelOrder: (asset: number, oid: number) => Promise<void>;
+  /** EIP-191 personal_sign with the connected main wallet. */
+  signMessage: (message: string) => Promise<`0x${string}`>;
   /** Bumped after every order or cancel so account views refetch. */
   revision: number;
 }
@@ -246,6 +248,14 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     [agentExchange],
   );
 
+  const signMessage = useCallback(
+    async (message: string) => {
+      if (!walletClient || !address) throw new Error('Connect a wallet first.');
+      return walletClient.signMessage({ account: address, message });
+    },
+    [walletClient, address],
+  );
+
   const value: WalletState = {
     wallets,
     address,
@@ -262,6 +272,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     enableTrading,
     placeOrder,
     cancelOrder,
+    signMessage,
     revision,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

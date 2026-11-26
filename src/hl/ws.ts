@@ -1,6 +1,6 @@
 // Single shared WebSocket to Hyperliquid with automatic resubscribe.
 // Subscriptions: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions
-import { WS_URL } from './api';
+import { WS_URL, info } from './api';
 
 export type Subscription =
   | { type: 'l2Book'; coin: string; nSigFigs?: number | null }
@@ -34,11 +34,24 @@ function msgKey(channel: string, data: any): string | null {
   }
 }
 
+interface Entry {
+  sub: Subscription;
+  handlers: Set<Handler>;
+  lastBookTime?: number; // l2Book: server time of the newest book delivered
+  poll?: number; // l2Book: REST fallback timer
+  seenTids?: Set<number>; // trades: drop repeats (e.g. the snapshot resent after a reconnect)
+}
+
+// Hyperliquid's l2Book stream can go ~10s between pushes, which starves the heatmap and ladder.
+// When the stream is quiet we read the book over REST once a second instead.
+const BOOK_STALE_MS = 1500;
+const BOOK_POLL_MS = 1000;
+
 export type SocketStatus = 'connecting' | 'open' | 'closed';
 
 class HLSocket {
   private ws: WebSocket | null = null;
-  private subs = new Map<string, { sub: Subscription; handlers: Set<Handler> }>();
+  private subs = new Map<string, Entry>();
   private retry = 0;
   private pingTimer: number | undefined;
   private statusListeners = new Set<(s: SocketStatus) => void>();
@@ -78,7 +91,8 @@ class HLSocket {
       }
       const key = msgKey(msg.channel, msg.data);
       if (!key) return;
-      this.subs.get(key)?.handlers.forEach((h) => h(msg.data));
+      const e = this.subs.get(key);
+      if (e) this.dispatch(e, msg.channel, msg.data);
     };
     ws.onclose = () => {
       window.clearInterval(this.pingTimer);
@@ -89,6 +103,36 @@ class HLSocket {
       window.setTimeout(() => this.connect(), delay);
     };
     ws.onerror = () => ws.close();
+  }
+
+  private dispatch(e: Entry, channel: string, data: any) {
+    if (channel === 'l2Book') {
+      if (e.lastBookTime && data.time <= e.lastBookTime) return;
+      e.lastBookTime = data.time;
+    } else if (channel === 'trades') {
+      const seen = (e.seenTids ??= new Set());
+      data = (data as { tid: number }[]).filter((t) => !seen.has(t.tid) && seen.add(t.tid));
+      if (seen.size > 5000) e.seenTids = new Set([...seen].slice(-2500));
+      if (data.length === 0) return;
+    }
+    e.handlers.forEach((h) => h(data));
+  }
+
+  private startBookPoll(e: Entry) {
+    const sub = e.sub as Extract<Subscription, { type: 'l2Book' }>;
+    let busy = false;
+    e.poll = window.setInterval(async () => {
+      if (busy || document.hidden || (e.lastBookTime && Date.now() - e.lastBookTime < BOOK_STALE_MS)) return;
+      busy = true;
+      try {
+        const book = await info<{ coin: string; time: number }>({ type: 'l2Book', coin: sub.coin, ...(sub.nSigFigs ? { nSigFigs: sub.nSigFigs } : {}) });
+        if (this.subs.get(subKey(sub)) === e) this.dispatch(e, 'l2Book', book);
+      } catch {
+        /* try again next tick */
+      } finally {
+        busy = false;
+      }
+    }, BOOK_POLL_MS);
   }
 
   private send(obj: unknown) {
@@ -102,6 +146,7 @@ class HLSocket {
       entry = { sub, handlers: new Set() };
       this.subs.set(key, entry);
       this.send({ method: 'subscribe', subscription: sub });
+      if (sub.type === 'l2Book') this.startBookPoll(entry);
     }
     entry.handlers.add(handler);
     this.connect();
@@ -111,6 +156,7 @@ class HLSocket {
       e.handlers.delete(handler);
       if (e.handlers.size === 0) {
         this.subs.delete(key);
+        window.clearInterval(e.poll);
         this.send({ method: 'unsubscribe', subscription: e.sub });
       }
     };
