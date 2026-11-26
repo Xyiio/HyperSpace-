@@ -143,6 +143,17 @@ export class DrawingsPrimitive extends BasePrimitive {
     return null;
   }
 
+  /** 'a' or 'b' when (px, py) is on an end-point handle of a two-point drawing. */
+  handleAt(id: string, px: number, py: number): 'a' | 'b' | null {
+    const d = this.drawings.find((x) => x.id === id);
+    if (!d || !(d.kind === 'trend' || d.kind === 'rect' || d.kind === 'fib')) return null;
+    const g = this.geom(d);
+    if (!g) return null;
+    if (Math.hypot(px - g.x1, py - g.y1) <= 9) return 'a';
+    if (Math.hypot(px - g.x2, py - g.y2) <= 9) return 'b';
+    return null;
+  }
+
   private geom(d: Drawing) {
     const x1 = this.x(d.a.t);
     const x2 = this.x(d.b.t);
@@ -226,9 +237,16 @@ export class DrawingsPrimitive extends BasePrimitive {
           const pts = this.path(d);
           if (pts.length > 1) {
             ctx.lineWidth = sel ? 2.5 : 2;
+            // Smooth the path: curve through the midpoints, using each recorded point as the control.
             ctx.beginPath();
             ctx.moveTo(pts[0][0], pts[0][1]);
-            for (const [x, y] of pts.slice(1)) ctx.lineTo(x, y);
+            for (let j = 1; j < pts.length - 1; j++) {
+              const mx = (pts[j][0] + pts[j + 1][0]) / 2;
+              const my = (pts[j][1] + pts[j + 1][1]) / 2;
+              ctx.quadraticCurveTo(pts[j][0], pts[j][1], mx, my);
+            }
+            const last = pts[pts.length - 1];
+            ctx.lineTo(last[0], last[1]);
             ctx.stroke();
           }
           handles = pts.length ? [pts[0], pts[pts.length - 1]] : [];

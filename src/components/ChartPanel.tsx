@@ -22,7 +22,7 @@ import { HeatmapPrimitive, TimeMapper, TradeBubblesPrimitive } from '../hl/primi
 import { bookToSnapshot, priceDecimals } from '../hl/stats';
 import { bollinger, ema, macd, rsi, sma, vwap, type Candle, type IndicatorConfig } from '../hl/indicators';
 import { LiquidationPrimitive, LiquidationScanner, bucketLiquidations, niceStep, type LiqStats } from '../hl/liqmap';
-import { DRAWING_INFO, DRAW_COLORS, DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingKind } from '../hl/drawings';
+import { DRAWING_INFO, DRAW_COLORS, DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingKind, type Pt } from '../hl/drawings';
 import { isLight, withAlpha, type ChartStyle } from '../hl/chartStyle';
 import { GhostCandlePrimitive, bookImbalance, predictNext, type Prediction } from '../hl/predict';
 import { VolumeProfilePrimitive, loadBookHistory, saveBookHistory, thinSnapshots, volumeProfile } from '../hl/profile';
@@ -203,39 +203,125 @@ export function ChartPanel({
     const colorFor = (kind: DrawingKind) =>
       kind === 'arrowUp' ? styleRef.current.up : kind === 'arrowDown' ? styleRef.current.down : drawColorRef.current;
 
-    // Placing drawing points uses native pointer events: lightweight-charts drops the second of two
-    // quick clicks (it treats them as a double-click), which lost the end point of trend lines and fibs.
+    // Pointer handling for drawings, all on native pointer events in the capture phase so we see
+    // them before lightweight-charts does:
+    //  - two-click and one-click tools: lightweight-charts drops the second of two quick clicks
+    //    (double-click detection), so points are placed from pointerup here;
+    //  - the pen and dragging a drawing take the gesture away from the chart (no panning), by
+    //    stopping the event and cancelling the browser's compatibility mouse events.
     let placedAt = 0;
     let down: { x: number; y: number } | null = null;
+    type Drag = { id: string; mode: 'move' | 'a' | 'b'; startL: number; startP: number; orig: Drawing; moved: boolean };
+    let drag: Drag | null = null;
+    const mapper = mapperRef.current;
     const local = (e: PointerEvent) => {
       const r = host.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     };
     const inPricePane = (x: number, y: number) => x >= 0 && x <= chart.timeScale().width() && y >= 0 && y <= chart.panes()[0].getHeight();
+    const take = (e: PointerEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      try {
+        host.setPointerCapture(e.pointerId);
+      } catch {
+        /* pointer already gone */
+      }
+    };
+    const shiftT = (t: number, dl: number) => {
+      const l = mapper.logical(t);
+      return l === null ? t : (mapper.timeAt(l + dl) ?? t);
+    };
     const onDown = (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      const pos = local(e);
       const kind = toolRef.current;
-      down = kind && e.button === 0 ? local(e) : null;
-      if (kind !== 'pen' || !down || !inPricePane(down.x, down.y)) return;
-      // Freehand: start a path and follow the pointer until release.
-      const pt = toPoint(down.x, down.y);
-      if (!pt) return;
-      host.setPointerCapture(e.pointerId);
-      draw.draft = { id: crypto.randomUUID(), kind: 'pen', a: pt, b: pt, color: colorFor('pen'), pts: [pt] };
-      draw.update();
+      down = kind ? pos : null;
+      if (!inPricePane(pos.x, pos.y)) return;
+      if (kind === 'pen') {
+        // Freehand: start a path and follow the pointer until release.
+        const pt = toPoint(pos.x, pos.y);
+        if (!pt) return;
+        take(e);
+        lastPen = pos;
+        draw.draft = { id: crypto.randomUUID(), kind: 'pen', a: pt, b: pt, color: colorFor('pen'), pts: [pt] };
+        draw.update();
+        return;
+      }
+      if (kind) return;
+      // No tool: press on a drawing to drag it (or its end point).
+      const hit = (draw.selected && draw.handleAt(draw.selected, pos.x, pos.y) ? draw.selected : null) ?? draw.hit(pos.x, pos.y);
+      if (!hit) return;
+      const d = draw.drawings.find((x) => x.id === hit)!;
+      const l = chart.timeScale().coordinateToLogical(pos.x);
+      const p = series.coordinateToPrice(pos.y);
+      if (l === null || p === null) return;
+      take(e);
+      select(hit);
+      drag = { id: hit, mode: draw.handleAt(hit, pos.x, pos.y) ?? 'move', startL: l, startP: p, orig: structuredClone(d), moved: false };
     };
     let lastPen = { x: 0, y: 0 };
-    const onMove = (e: PointerEvent) => {
-      if (draw.draft?.kind !== 'pen' || !down) return;
-      const { x, y } = local(e);
-      if (Math.hypot(x - lastPen.x, y - lastPen.y) < 3) return;
+    const addPen = (x: number, y: number) => {
+      if (Math.hypot(x - lastPen.x, y - lastPen.y) < 2) return;
       lastPen = { x, y };
       const pt = toPoint(x, y);
-      if (!pt) return;
-      draw.draft.pts!.push(pt);
+      if (!pt || !draw.draft?.pts) return;
+      draw.draft.pts.push(pt);
       draw.draft.b = pt;
-      draw.update();
+    };
+    const onMove = (e: PointerEvent) => {
+      if (draw.draft?.kind === 'pen' && down) {
+        e.stopPropagation();
+        // Use every intermediate position the browser recorded, so fast curves stay curved.
+        const evs = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [];
+        for (const ev of evs.length ? evs : [e]) {
+          const { x, y } = local(ev);
+          addPen(x, y);
+        }
+        draw.update();
+        return;
+      }
+      const pos = local(e);
+      if (drag) {
+        e.stopPropagation();
+        const d = draw.drawings.find((x) => x.id === drag!.id);
+        const l = chart.timeScale().coordinateToLogical(pos.x);
+        const p = series.coordinateToPrice(pos.y);
+        if (!d || l === null || p === null) return;
+        const dl = l - drag.startL;
+        const dp = p - drag.startP;
+        const o = drag.orig;
+        drag.moved = true;
+        if (drag.mode === 'move') {
+          const mv = (q: Pt) => ({ t: shiftT(q.t, dl), p: q.p + dp });
+          d.a = mv(o.a);
+          d.b = d.kind === 'hline' ? { ...d.a } : mv(o.b);
+          if (o.pts) d.pts = o.pts.map(mv);
+        } else {
+          const pt = toPoint(pos.x, pos.y);
+          if (pt) d[drag.mode] = pt;
+        }
+        draw.update();
+        return;
+      }
+      // Hover feedback when no tool is active.
+      if (!toolRef.current && e.buttons === 0) {
+        const onHandle = draw.selected && draw.handleAt(draw.selected, pos.x, pos.y);
+        host.style.cursor = onHandle ? 'crosshair' : draw.hit(pos.x, pos.y) ? 'move' : '';
+      }
     };
     const onUp = (e: PointerEvent) => {
+      if (drag) {
+        const moved = drag.moved;
+        drag = null;
+        e.stopPropagation();
+        if (moved) {
+          persist();
+          placedAt = performance.now();
+          select(draw.selected);
+        }
+        return;
+      }
       const kind = toolRef.current;
       const start = down;
       down = null;
@@ -247,7 +333,7 @@ export function ChartPanel({
           draw.drawings.push(d);
           persist();
           placedAt = performance.now();
-          toolDoneRef.current();
+          // The pen stays active for more strokes; Esc or the button turns it off.
         }
         draw.update();
         return;
@@ -278,9 +364,20 @@ export function ChartPanel({
       }
       draw.update();
     };
-    host.addEventListener('pointerdown', onDown);
-    host.addEventListener('pointermove', onMove);
-    host.addEventListener('pointerup', onUp);
+    const onCancel = () => {
+      if (draw.draft?.kind === 'pen') draw.draft = null;
+      if (drag) {
+        const d = draw.drawings.find((x) => x.id === drag!.id);
+        if (d) Object.assign(d, drag.orig);
+        drag = null;
+      }
+      down = null;
+      draw.update();
+    };
+    host.addEventListener('pointerdown', onDown, true);
+    host.addEventListener('pointermove', onMove, true);
+    host.addEventListener('pointerup', onUp, true);
+    host.addEventListener('pointercancel', onCancel, true);
 
     // With no tool: select a drawing under the cursor, otherwise stage an order at that price.
     chart.subscribeClick((p) => {
@@ -333,9 +430,10 @@ export function ChartPanel({
     disposedRef.current = false;
     return () => {
       window.removeEventListener('keydown', onKey);
-      host.removeEventListener('pointerdown', onDown);
-      host.removeEventListener('pointermove', onMove);
-      host.removeEventListener('pointerup', onUp);
+      host.removeEventListener('pointerdown', onDown, true);
+      host.removeEventListener('pointermove', onMove, true);
+      host.removeEventListener('pointerup', onUp, true);
+      host.removeEventListener('pointercancel', onCancel, true);
       indSeriesRef.current.clear();
       disposedRef.current = true;
       // React runs the other effects' cleanups after this one, and some of them touch series
@@ -778,6 +876,8 @@ export function ChartPanel({
   // Freehand needs the pointer: stop the chart panning while the pen is active.
   useEffect(() => {
     chartRef.current?.applyOptions({ handleScroll: tool !== 'pen', handleScale: tool !== 'pen' });
+    // Stop touch and pen input from scrolling the page while drawing freehand.
+    if (hostRef.current) hostRef.current.style.touchAction = tool === 'pen' ? 'none' : '';
   }, [tool]);
 
   // Edit the selected drawing.

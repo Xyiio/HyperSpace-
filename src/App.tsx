@@ -6,6 +6,7 @@ import { Ideas } from './pages/Ideas';
 import { WalletProvider } from './wallet/WalletContext';
 import { NetworkSwitch, WalletButton } from './components/WalletButton';
 import { NETWORK } from './hl/network';
+import { Logo } from './components/Logo';
 
 type Route = { page: 'trade'; coin: string; wallet: string | null } | { page: 'wallet'; address: string | null }
   | { page: 'ideas'; coin: string | null };
@@ -55,8 +56,8 @@ export default function App() {
     <WalletProvider>
     <div className="app">
       <header className="top">
-        <a className="brand" href="#/trade/BTC">
-          <span className="mark">◆</span> HyperSpace
+        <a className="brand" href="#/trade/BTC" aria-label="HyperSpace home">
+          <Logo />
         </a>
         <nav>
           <a className={route.page === 'trade' ? 'on' : ''} href={`#/trade/${route.page === 'trade' ? route.coin : 'BTC'}`}>
