@@ -120,9 +120,69 @@ export function vwap(candles: Candle[]): number[] {
   return out;
 }
 
+/**
+ * Cumulative volume delta: buying minus selling volume, added up.
+ * Hyperliquid's candles do not split volume by aggressor, so history uses the usual estimate
+ * (volume × (close − open) / (high − low)). Bars watched live from the trade stream since
+ * `realFrom` use the real taker-side delta instead.
+ */
+export function cvd(candles: Candle[], real?: Map<number, number>, realFrom = Infinity): number[] {
+  let acc = 0;
+  return candles.map((k) => {
+    const range = k.h - k.l;
+    const est = range > 0 ? (k.v * (k.c - k.o)) / range : 0;
+    acc += k.t >= realFrom && real?.has(k.t) ? real.get(k.t)! : est;
+    return acc;
+  });
+}
+
+/**
+ * Anchored VWAP from the bar containing `anchorMs` to the end, NaN before it.
+ */
+export function anchoredVwap(candles: Candle[], anchorMs: number): number[] {
+  const out = new Array<number>(candles.length).fill(NaN);
+  let start = candles.findIndex((k, i) => k.t <= anchorMs && (i === candles.length - 1 || candles[i + 1].t > anchorMs));
+  if (start < 0) start = anchorMs < (candles[0]?.t ?? 0) ? 0 : -1;
+  if (start < 0) return out;
+  let pv = 0;
+  let vol = 0;
+  for (let i = start; i < candles.length; i++) {
+    const k = candles[i];
+    const tp = (k.h + k.l + k.c) / 3;
+    pv += tp * k.v;
+    vol += k.v;
+    out[i] = vol > 0 ? pv / vol : tp;
+  }
+  return out;
+}
+
+/**
+ * Puts timed points onto bar times: each bar gets `pick` of the points inside it.
+ * Used for funding (summed per bar) and recorded open interest (last value per bar).
+ */
+export function toBars(barTimes: number[], intervalMs: number, pts: { t: number; v: number }[], pick: 'sum' | 'last'): number[] {
+  const out = new Array<number>(barTimes.length).fill(NaN);
+  if (!barTimes.length) return out;
+  let j = 0;
+  const sorted = [...pts].sort((a, b) => a.t - b.t);
+  for (let i = 0; i < barTimes.length; i++) {
+    const start = barTimes[i];
+    const end = i + 1 < barTimes.length ? barTimes[i + 1] : start + intervalMs;
+    while (j < sorted.length && sorted[j].t < start) j++;
+    let k = j;
+    let acc = NaN;
+    while (k < sorted.length && sorted[k].t < end) {
+      acc = pick === 'sum' ? (Number.isNaN(acc) ? 0 : acc) + sorted[k].v : sorted[k].v;
+      k++;
+    }
+    out[i] = acc;
+  }
+  return out;
+}
+
 // ---------- Catalogue used by the UI ----------
 
-export type BuiltinKind = 'sma' | 'ema' | 'bb' | 'vwap' | 'rsi' | 'macd';
+export type BuiltinKind = 'sma' | 'ema' | 'bb' | 'vwap' | 'rsi' | 'macd' | 'cvd' | 'funding' | 'oi';
 export type IndicatorKind = BuiltinKind | 'script';
 
 export interface IndicatorConfig {
@@ -144,6 +204,9 @@ export const INDICATOR_INFO: Record<BuiltinKind, { label: string; params: { name
   vwap: { label: 'VWAP (daily, UTC)', params: [], pane: false },
   rsi: { label: 'RSI', params: [{ name: 'Length', def: 14 }], pane: true },
   macd: { label: 'MACD', params: [{ name: 'Fast', def: 12 }, { name: 'Slow', def: 26 }, { name: 'Signal', def: 9 }], pane: true },
+  cvd: { label: 'CVD (cumulative volume delta)', params: [], pane: true },
+  funding: { label: 'Funding rate history', params: [], pane: true },
+  oi: { label: 'Open interest (recorded while open)', params: [], pane: true },
 };
 
 export const PALETTE = ['#f5c542', '#a78bfa', '#60a5fa', '#f472b6', '#fb923c', '#4ade80'];

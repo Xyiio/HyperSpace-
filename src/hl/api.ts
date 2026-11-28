@@ -231,10 +231,94 @@ export interface OpenOrder {
   orderType: string;
   reduceOnly: boolean;
   tif: string | null;
+  // Trigger (take-profit / stop) orders.
+  isTrigger?: boolean;
+  triggerPx?: string;
+  triggerCondition?: string;
+  isPositionTpsl?: boolean;
 }
 
 export function fetchOpenOrders(user: string, dex = '', signal?: AbortSignal) {
   return info<OpenOrder[]>({ type: 'frontendOpenOrders', user, dex }, signal);
 }
+
+// ---------- Funding, open interest, spot, auctions ----------
+
+export type Venue = 'HlPerp' | 'BinPerp' | 'BybitPerp';
+export type PredictedFundings = [string, [Venue, { fundingRate: string; nextFundingTime: number; fundingIntervalHours?: number } | null][]][];
+
+/** Next funding rate for every coin on Hyperliquid, Binance and Bybit (as Hyperliquid reports them). */
+export const fetchPredictedFundings = (signal?: AbortSignal) => info<PredictedFundings>({ type: 'predictedFundings' }, signal);
+
+export interface FundingPoint {
+  coin: string;
+  fundingRate: string;
+  premium: string;
+  time: number;
+}
+
+/** Hourly funding history (up to 500 rows per call). */
+export const fetchFundingHistory = (coin: string, startTime: number, endTime?: number, signal?: AbortSignal) =>
+  info<FundingPoint[]>({ type: 'fundingHistory', coin, startTime, ...(endTime ? { endTime } : {}) }, signal);
+
+/** Markets whose open interest is at Hyperliquid's cap (no new positions can open). */
+export const fetchOiCapped = (dex = '', signal?: AbortSignal) => info<string[]>({ type: 'perpsAtOpenInterestCap', ...(dex ? { dex } : {}) }, signal);
+
+export interface SpotMeta {
+  tokens: { name: string; index: number; szDecimals: number; fullName?: string | null }[];
+  universe: { name: string; tokens: [number, number]; index: number; isCanonical: boolean }[];
+}
+export interface SpotCtx {
+  coin: string;
+  markPx: string;
+  midPx: string | null;
+  prevDayPx: string;
+  dayNtlVlm: string;
+}
+export const fetchSpot = (signal?: AbortSignal) => info<[SpotMeta, SpotCtx[]]>({ type: 'spotMetaAndAssetCtxs' }, signal);
+
+export interface GasAuction {
+  startTimeSeconds: number;
+  durationSeconds: number;
+  startGas: string;
+  currentGas: string | null;
+  endGas: string | null;
+}
+/** Spot ticker (HIP-1) deploy auction. */
+export const fetchSpotAuction = (signal?: AbortSignal) =>
+  info<{ gasAuction: GasAuction }>({ type: 'spotDeployState', user: '0x0000000000000000000000000000000000000000' }, signal).then((r) => r.gasAuction);
+/** HIP-3 perp dex deploy auction. */
+export const fetchPerpAuction = (signal?: AbortSignal) => info<GasAuction>({ type: 'perpDeployAuctionStatus' }, signal);
+
+export interface TwapState {
+  coin: string;
+  executedNtl: string;
+  executedSz: string;
+  minutes: number;
+  randomize: boolean;
+  reduceOnly: boolean;
+  side: 'B' | 'A';
+  sz: string;
+  timestamp: number;
+  user: string;
+}
+export interface TwapHistoryRow {
+  time: number;
+  state: TwapState;
+  status: { status: 'finished' | 'activated' | 'terminated' | 'waitingForTrigger' | 'stopped' | 'error'; description?: string };
+  twapId?: number;
+}
+export const fetchTwapHistory = (user: string, signal?: AbortSignal) => info<TwapHistoryRow[]>({ type: 'twapHistory', user }, signal);
+
+export interface SubAccount {
+  name: string;
+  subAccountUser: string;
+  master: string;
+}
+export const fetchSubAccounts = (user: string, signal?: AbortSignal) => info<SubAccount[] | null>({ type: 'subAccounts', user }, signal).then((r) => r ?? []);
+export const fetchLeadingVaults = (user: string, signal?: AbortSignal) => info<{ address: string; name: string }[]>({ type: 'leadingVaults', user }, signal).catch(() => []);
+
+/** Vault that runs Hyperliquid's backstop liquidations; trades against it are liquidations. */
+export const HLP_LIQUIDATOR = '0x2e3d94f0562703b25c83308a05046ddaf9a8dd14';
 
 export const isAddress = (s: string) => /^0x[0-9a-fA-F]{40}$/.test(s.trim());

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   AreaSeries,
   BarSeries,
@@ -10,17 +10,19 @@ import {
   createChart,
   createSeriesMarkers,
   type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
   type SeriesMarker,
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import { fetchCandles, INTERVAL_MS, type Fill, type OpenOrder, type Interval, type L2Book, type Market, type RawCandle, type Trade } from '../hl/api';
+import { fetchCandles, fetchFundingHistory, HLP_LIQUIDATOR, INTERVAL_MS, type Fill, type Interval, type L2Book, type Market, type RawCandle, type Trade } from '../hl/api';
 import { hlSocket } from '../hl/ws';
 import { HeatmapPrimitive, TimeMapper, TradeBubblesPrimitive } from '../hl/primitives';
 import { bookToSnapshot, priceDecimals } from '../hl/stats';
-import { bollinger, ema, macd, rsi, sma, vwap, type Candle, type IndicatorConfig } from '../hl/indicators';
+import { bollinger, cvd, ema, macd, rsi, sma, toBars, vwap, type Candle, type IndicatorConfig } from '../hl/indicators';
+import { loadSamples, oiSeries, onSamples } from '../hl/recorder';
 import { LiquidationPrimitive, LiquidationScanner, bucketLiquidations, niceStep, type LiqStats } from '../hl/liqmap';
 import { DRAWING_INFO, DRAW_COLORS, DrawingsPrimitive, loadDrawings, saveDrawings, type Drawing, type DrawingKind, type Pt } from '../hl/drawings';
 import { isLight, withAlpha, type ChartStyle } from '../hl/chartStyle';
@@ -29,6 +31,24 @@ import { GhostCandlePrimitive, bookImbalance, predictNext, type Prediction } fro
 import { VolumeProfilePrimitive, loadBookHistory, saveBookHistory, thinSnapshots, volumeProfile } from '../hl/profile';
 
 const SNAPSHOT_EVERY_MS = 1000;
+
+/** A horizontal line on the chart: an order, position entry, liquidation, TP/SL, or a staged level. */
+export interface ChartLine {
+  id: string;
+  price: number;
+  color: string;
+  title: string;
+  style?: 'solid' | 'dashed' | 'dotted';
+  width?: 1 | 2;
+  /** Drag it to move the order (calls onDragLine on release). */
+  draggable?: boolean;
+}
+
+/** Handle the terminal uses for screenshots and snapshot links. */
+export interface ChartApi {
+  screenshot: () => HTMLCanvasElement | null;
+  drawings: () => Drawing[];
+}
 const MAX_BUBBLES = 600;
 
 interface Props {
@@ -38,7 +58,15 @@ interface Props {
   heatmap: boolean;
   bigTradeUsd: number;
   walletFills: Fill[] | null;
-  openOrders?: OpenOrder[];
+  lines?: ChartLine[];
+  onDragLine?: (id: string, price: number) => void;
+  /** Chart this market divided by another (e.g. ETH/BTC). */
+  ratioWith?: string | null;
+  /** Shared drawings from a snapshot link, shown instead of this browser's (read-only). */
+  sharedDrawings?: Drawing[] | null;
+  onApi?: (api: ChartApi | null) => void;
+  onDrawingAlert?: (d: Drawing) => void;
+  overlay?: ReactNode;
   indicators: IndicatorConfig[];
   tool: DrawingKind | null;
   onToolDone: () => void;
@@ -79,7 +107,13 @@ export function ChartPanel({
   heatmap,
   bigTradeUsd,
   walletFills,
-  openOrders,
+  lines,
+  onDragLine,
+  ratioWith = null,
+  sharedDrawings = null,
+  onApi,
+  onDrawingAlert,
+  overlay,
   indicators,
   tool,
   onToolDone,
@@ -117,8 +151,20 @@ export function ChartPanel({
   toolRef.current = tool;
   const toolDoneRef = useRef(onToolDone);
   toolDoneRef.current = onToolDone;
-  const coinRef = useRef(market.name);
-  coinRef.current = market.name;
+  // Drawings are saved per market, or per pair for ratio charts.
+  const chartKey = ratioWith ? `${market.name}/${ratioWith}` : market.name;
+  const coinRef = useRef(chartKey);
+  coinRef.current = chartKey;
+  const sharedRef = useRef(sharedDrawings);
+  sharedRef.current = sharedDrawings;
+  const linesRef = useRef<{ def: ChartLine; pl: IPriceLine }[]>([]);
+  const lineDragRef = useRef<{ id: string; pl: IPriceLine; def: ChartLine } | null>(null);
+  const dragLineCb = useRef(onDragLine);
+  dragLineCb.current = onDragLine;
+  // Taker buy minus sell volume per bar, from the live trade stream (for CVD).
+  const deltaRef = useRef<{ from: number; map: Map<number, number> }>({ from: Infinity, map: new Map() });
+  const fundingRef = useRef<{ t: number; v: number }[]>([]);
+  const oiRef = useRef<{ t: number; v: number }[]>([]);
   const recalcRef = useRef<() => void>(() => {});
   const liqRef = useRef<LiquidationPrimitive | null>(null);
   const liqStatsRef = useRef(onLiqStats);
@@ -139,6 +185,8 @@ export function ChartPanel({
   // The selected drawing (for the colour / delete bar) and the open text editor.
   const [sel, setSel] = useState<Drawing | null>(null);
   const [textEdit, setTextEdit] = useState<{ id: string; x: number; y: number; value: string; isNew: boolean } | null>(null);
+  const onApiRef = useRef(onApi);
+  onApiRef.current = onApi;
   const uiRef = useRef({ setSel, setTextEdit });
   uiRef.current = { setSel, setTextEdit };
 
@@ -192,7 +240,9 @@ export function ChartPanel({
       const t = l === null ? null : mapperRef.current.timeAt(l);
       return t === null || p === null ? null : { t, p };
     };
-    const persist = () => saveDrawings(coinRef.current, draw.drawings);
+    const persist = () => {
+      if (!sharedRef.current) saveDrawings(coinRef.current, draw.drawings);
+    };
 
     const select = (id: string | null) => {
       draw.selected = id;
@@ -237,6 +287,14 @@ export function ChartPanel({
       const l = mapper.logical(t);
       return l === null ? t : (mapper.timeAt(l + dl) ?? t);
     };
+    const lineAt = (y: number) => {
+      for (const l of linesRef.current) {
+        if (!l.def.draggable) continue;
+        const ly = series.priceToCoordinate(l.def.price);
+        if (ly !== null && Math.abs(ly - y) <= 5) return { id: l.def.id, pl: l.pl, def: l.def };
+      }
+      return null;
+    };
     const onDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
       const pos = local(e);
@@ -254,7 +312,14 @@ export function ChartPanel({
         return;
       }
       if (kind) return;
-      // No tool: press on a drawing to drag it (or its end point).
+      // No tool: press on a draggable order line to move it.
+      const ln = lineAt(pos.y);
+      if (ln) {
+        take(e);
+        lineDragRef.current = ln;
+        return;
+      }
+      // Press on a drawing to drag it (or its end point).
       const hit = (draw.selected && draw.handleAt(draw.selected, pos.x, pos.y) ? draw.selected : null) ?? draw.hit(pos.x, pos.y);
       if (!hit) return;
       const d = draw.drawings.find((x) => x.id === hit)!;
@@ -287,6 +352,13 @@ export function ChartPanel({
         return;
       }
       const pos = local(e);
+      if (lineDragRef.current) {
+        e.stopPropagation();
+        const p = series.coordinateToPrice(pos.y);
+        const ld = lineDragRef.current;
+        if (p !== null) ld.pl.applyOptions({ price: p, title: `${ld.def.title} → ${p.toPrecision(6)}` });
+        return;
+      }
       if (drag) {
         e.stopPropagation();
         const d = draw.drawings.find((x) => x.id === drag!.id);
@@ -312,10 +384,20 @@ export function ChartPanel({
       // Hover feedback when no tool is active.
       if (!toolRef.current && e.buttons === 0) {
         const onHandle = draw.selected && draw.handleAt(draw.selected, pos.x, pos.y);
-        host.style.cursor = onHandle ? 'crosshair' : draw.hit(pos.x, pos.y) ? 'move' : '';
+        host.style.cursor = inPricePane(pos.x, pos.y) && lineAt(pos.y) ? 'ns-resize' : onHandle ? 'crosshair' : draw.hit(pos.x, pos.y) ? 'move' : '';
       }
     };
     const onUp = (e: PointerEvent) => {
+      const ld = lineDragRef.current;
+      if (ld) {
+        lineDragRef.current = null;
+        e.stopPropagation();
+        placedAt = performance.now();
+        const p = series.coordinateToPrice(local(e).y);
+        if (p !== null && Math.abs(p - ld.def.price) / ld.def.price > 1e-6) dragLineCb.current?.(ld.id, p);
+        else ld.pl.applyOptions({ price: ld.def.price, title: ld.def.title });
+        return;
+      }
       if (drag) {
         const moved = drag.moved;
         drag = null;
@@ -370,6 +452,9 @@ export function ChartPanel({
       draw.update();
     };
     const onCancel = () => {
+      const ld = lineDragRef.current;
+      if (ld) ld.pl.applyOptions({ price: ld.def.price, title: ld.def.title });
+      lineDragRef.current = null;
       if (draw.draft?.kind === 'pen') draw.draft = null;
       if (drag) {
         const d = draw.drawings.find((x) => x.id === drag!.id);
@@ -412,7 +497,7 @@ export function ChartPanel({
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-      if ((e.key === 'Delete' || e.key === 'Backspace') && draw.selected) {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && draw.selected && !sharedRef.current) {
         draw.drawings = draw.drawings.filter((d) => d.id !== draw.selected);
         persist();
         select(null);
@@ -433,7 +518,18 @@ export function ChartPanel({
     bubblesRef.current = bubbles;
     drawRef.current = draw;
     disposedRef.current = false;
+    onApiRef.current?.({
+      screenshot: () => {
+        try {
+          return chart.takeScreenshot();
+        } catch {
+          return null;
+        }
+      },
+      drawings: () => draw.drawings,
+    });
     return () => {
+      onApiRef.current?.(null);
       window.removeEventListener('keydown', onKey);
       host.removeEventListener('pointerdown', onDown, true);
       host.removeEventListener('pointermove', onMove, true);
@@ -463,6 +559,7 @@ export function ChartPanel({
     mapper.intervalMs = INTERVAL_MS[interval];
     mapper.barTimesMs = [];
     candlesRef.current = [];
+    if (drawRef.current) drawRef.current.candles = candlesRef.current;
     let pending = false;
     let recalcTimer: number | undefined;
     const scheduleRecalc = () => {
@@ -478,39 +575,75 @@ export function ChartPanel({
     setAltData(altRef.current, []);
     setStatus('Loading candles…');
 
-    // 1m needs ~1,500 bars so the daily VWAP covers the whole UTC day.
-    fetchCandles(market.name, interval, interval === '1m' ? 1500 : 500, ac.signal)
-      .then((candles) => {
-        if (ac.signal.aborted) return;
-        series.setData(candles.map(toBar));
-        vol.setData(candles.map((c) => toVol(c, styleRef.current)));
-        setAltData(altRef.current, candles.map(toBar));
-        mapper.barTimesMs = candles.map((c) => c.t);
-        candlesRef.current = candles.map(toCandle);
-        recalcRef.current();
-        chartRef.current?.timeScale().scrollToRealTime();
-        setStatus('');
-        unsub = hlSocket.subscribe({ type: 'candle', coin: market.name, interval }, (c: RawCandle) => {
-          series.update(toBar(c));
-          vol.update(toVol(c, styleRef.current));
-          updateAlt(altRef.current, toBar(c));
-          const bars = mapper.barTimesMs;
-          if (bars.length === 0 || c.t > bars[bars.length - 1]) bars.push(c.t);
-          const ks = candlesRef.current;
-          if (ks.length && ks[ks.length - 1].t === c.t) ks[ks.length - 1] = toCandle(c);
-          else if (!ks.length || c.t > ks[ks.length - 1].t) ks.push(toCandle(c));
-          scheduleRecalc();
+    const bars = interval === '1m' ? 1500 : 500;
+    const apply = (candles: RawCandle[]) => {
+      series.setData(candles.map(toBar));
+      vol.setData(candles.map((c) => toVol(c, styleRef.current)));
+      setAltData(altRef.current, candles.map(toBar));
+      mapper.barTimesMs = candles.map((c) => c.t);
+      candlesRef.current = candles.map(toCandle);
+      if (drawRef.current) drawRef.current.candles = candlesRef.current;
+      recalcRef.current();
+      chartRef.current?.timeScale().scrollToRealTime();
+      setStatus('');
+    };
+    const onLive = (c: RawCandle) => {
+      series.update(toBar(c));
+      vol.update(toVol(c, styleRef.current));
+      updateAlt(altRef.current, toBar(c));
+      const bt = mapper.barTimesMs;
+      if (bt.length === 0 || c.t > bt[bt.length - 1]) bt.push(c.t);
+      const ks = candlesRef.current;
+      if (ks.length && ks[ks.length - 1].t === c.t) ks[ks.length - 1] = toCandle(c);
+      else if (!ks.length || c.t > ks[ks.length - 1].t) ks.push(toCandle(c));
+      scheduleRecalc();
+    };
+    if (ratioWith) {
+      // Ratio chart: this market's candles divided by the other's, bar by bar.
+      const unsubs: (() => void)[] = [];
+      Promise.all([fetchCandles(market.name, interval, bars, ac.signal), fetchCandles(ratioWith, interval, bars, ac.signal)])
+        .then(([a, b]) => {
+          if (ac.signal.aborted) return;
+          const A = new Map(a.map((c) => [c.t, c]));
+          const B = new Map(b.map((c) => [c.t, c]));
+          const ratios = a.flatMap((c) => (B.has(c.t) ? [ratioCandle(c, B.get(c.t)!)] : []));
+          if (!ratios.length) return setStatus(`No overlapping candles for ${market.name} and ${ratioWith}.`);
+          const r = Number(ratios[ratios.length - 1].c);
+          const dec = Math.min(10, Math.max(2, 5 - Math.floor(Math.log10(Math.abs(r) || 1))));
+          series.applyOptions({ priceFormat: { type: 'price', precision: dec, minMove: 10 ** -dec } });
+          altRef.current?.applyOptions({ priceFormat: { type: 'price', precision: dec, minMove: 10 ** -dec } });
+          if (drawRef.current) drawRef.current.decimals = dec;
+          apply(ratios);
+          const live = (mine: Map<number, RawCandle>, other: Map<number, RawCandle>, first: boolean) => (c: RawCandle) => {
+            mine.set(c.t, c);
+            const o = other.get(c.t);
+            if (o) onLive(first ? ratioCandle(c, o) : ratioCandle(o, c));
+          };
+          unsubs.push(hlSocket.subscribe({ type: 'candle', coin: market.name, interval }, live(A, B, true)));
+          unsubs.push(hlSocket.subscribe({ type: 'candle', coin: ratioWith, interval }, live(B, A, false)));
+        })
+        .catch((e) => {
+          if (!ac.signal.aborted) setStatus(`Could not load candles: ${e.message}`);
         });
-      })
-      .catch((e) => {
-        if (!ac.signal.aborted) setStatus(`Could not load candles: ${e.message}`);
-      });
+      unsub = () => unsubs.forEach((u) => u());
+    } else {
+      // 1m needs ~1,500 bars so the daily VWAP covers the whole UTC day.
+      fetchCandles(market.name, interval, bars, ac.signal)
+        .then((candles) => {
+          if (ac.signal.aborted) return;
+          apply(candles);
+          unsub = hlSocket.subscribe({ type: 'candle', coin: market.name, interval }, onLive);
+        })
+        .catch((e) => {
+          if (!ac.signal.aborted) setStatus(`Could not load candles: ${e.message}`);
+        });
+    }
     return () => {
       ac.abort();
       unsub?.();
       window.clearTimeout(recalcTimer);
     };
-  }, [market.name, interval]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [market.name, interval, ratioWith]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Order-book heatmap: one column per second. History is saved in this browser per market and
   // grouping, so it keeps building across visits (up to 24 hours).
@@ -574,7 +707,7 @@ export function ChartPanel({
       for (const t of trades) {
         const notional = Number(t.px) * Number(t.sz);
         if (notional < bigTradeUsd) continue;
-        bubbles.trades.push({ t: t.time, px: Number(t.px), notional, buy: t.side === 'B' });
+        bubbles.trades.push({ t: t.time, px: Number(t.px), notional, buy: t.side === 'B', liq: !!t.users?.includes(HLP_LIQUIDATOR) });
         added = true;
       }
       if (!added) return;
@@ -582,6 +715,62 @@ export function ChartPanel({
       bubbles.update();
     });
   }, [market.name, bigTradeUsd]);
+
+  // Real taker delta per bar for CVD, counted from the first bar that opens after we start watching.
+  const wantCvd = indicators.some((i) => i.kind === 'cvd') && !ratioWith;
+  useEffect(() => {
+    deltaRef.current = { from: Infinity, map: new Map() };
+    if (!wantCvd) return;
+    const ms = INTERVAL_MS[interval];
+    const startBar = Math.floor(Date.now() / ms) * ms + ms;
+    deltaRef.current.from = startBar;
+    return hlSocket.subscribe({ type: 'trades', coin: market.name }, (trades: Trade[]) => {
+      const map = deltaRef.current.map;
+      for (const t of trades) {
+        const bar = Math.floor(t.time / ms) * ms;
+        if (bar < startBar) continue;
+        map.set(bar, (map.get(bar) ?? 0) + (t.side === 'B' ? 1 : -1) * Number(t.sz));
+      }
+    });
+  }, [market.name, interval, wantCvd]);
+
+  // Funding history for the funding pane: hourly rates back to the first loaded candle.
+  const wantFunding = indicators.some((i) => i.kind === 'funding') && !ratioWith;
+  useEffect(() => {
+    fundingRef.current = [];
+    if (!wantFunding) return;
+    const ac = new AbortController();
+    const bars = interval === '1m' ? 1500 : 500;
+    let start = Math.max(Date.now() - bars * INTERVAL_MS[interval], Date.now() - 365 * 86_400_000);
+    (async () => {
+      const out: { t: number; v: number }[] = [];
+      for (let i = 0; i < 20 && start < Date.now(); i++) {
+        const rows = await fetchFundingHistory(market.name, start, undefined, ac.signal);
+        if (!rows.length) break;
+        out.push(...rows.map((r) => ({ t: r.time, v: Number(r.fundingRate) * 100 })));
+        start = rows[rows.length - 1].time + 1;
+        if (rows.length < 500) break;
+      }
+      if (ac.signal.aborted) return;
+      fundingRef.current = out;
+      recalcRef.current();
+    })().catch(() => {});
+    return () => ac.abort();
+  }, [market.name, interval, wantFunding]);
+
+  // Open interest recorded by HyperSpace while it is open.
+  const wantOi = indicators.some((i) => i.kind === 'oi') && !ratioWith;
+  useEffect(() => {
+    oiRef.current = [];
+    if (!wantOi) return;
+    const load = () =>
+      loadSamples().then((s) => {
+        oiRef.current = oiSeries(s, market.name);
+        recalcRef.current();
+      });
+    void load();
+    return onSamples(() => void load());
+  }, [market.name, wantOi]);
 
   // Indicators: rebuild series when the list changes; recompute values on new candles.
   useEffect(() => {
@@ -607,6 +796,10 @@ export function ChartPanel({
         s.createPriceLine({ price: 70, color: '#3a4655', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
         s.createPriceLine({ price: 30, color: '#3a4655', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
         list.push(s);
+      } else if (cfg.kind === 'cvd' || cfg.kind === 'oi') {
+        list.push(line(nextPane++, cfg.color, 2, cfg.kind === 'cvd' ? 'CVD' : 'Open interest $'));
+      } else if (cfg.kind === 'funding') {
+        list.push(chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: true, title: 'Funding %/h', priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } }, nextPane++));
       } else if (cfg.kind === 'macd') {
         const pane = nextPane++;
         list.push(
@@ -704,6 +897,12 @@ export function ChartPanel({
         list[1].setData(toLine(r.mid));
         list[2].setData(toLine(r.lower));
       } else if (cfg.kind === 'rsi') list[0].setData(toLine(rsi(closes, a)));
+      else if (cfg.kind === 'cvd') list[0].setData(toLine(cvd(ks, deltaRef.current.map, deltaRef.current.from)));
+      else if (cfg.kind === 'oi') list[0].setData(toLine(toBars(ks.map((k) => k.t), INTERVAL_MS[interval], oiRef.current, 'last')));
+      else if (cfg.kind === 'funding') {
+        const vals = toBars(ks.map((k) => k.t), INTERVAL_MS[interval], fundingRef.current, 'sum');
+        list[0].setData(vals.map((v, i) => (Number.isFinite(v) ? { time: time(i), value: v, color: v >= 0 ? withAlpha(styleRef.current.up, 0.7) : withAlpha(styleRef.current.down, 0.7) } : { time: time(i) })));
+      }
       else if (cfg.kind === 'macd') {
         const r = macd(closes, a, b, c);
         list[0].setData(
@@ -779,12 +978,12 @@ export function ChartPanel({
   useEffect(() => {
     const draw = drawRef.current;
     if (!draw) return;
-    draw.drawings = loadDrawings(market.name);
+    draw.drawings = sharedDrawings ? structuredClone(sharedDrawings) : loadDrawings(chartKey);
     draw.draft = null;
     draw.selected = null;
-    draw.decimals = priceDecimals(Number(market.ctx.markPx), market.szDecimals);
+    if (!ratioWith) draw.decimals = priceDecimals(Number(market.ctx.markPx), market.szDecimals);
     draw.update();
-  }, [market.name]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [chartKey, sharedDrawings]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const draw = drawRef.current;
@@ -792,7 +991,7 @@ export function ChartPanel({
     draw.drawings = [];
     draw.draft = null;
     draw.selected = null;
-    saveDrawings(market.name, []);
+    if (!sharedRef.current) saveDrawings(chartKey, []);
     draw.update();
   }, [clearDrawings]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -828,24 +1027,31 @@ export function ChartPanel({
     markers.setMarkers(list);
   }, [walletFills, market.name, interval]);
 
-  // The connected wallet's resting orders as price lines.
+  // Order, position and staged lines. Rebuilt only when they change, and never mid-drag.
+  const lineSig = JSON.stringify(lines ?? []);
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
-    const lines = (openOrders ?? [])
-      .filter((o) => o.coin === market.name)
-      .map((o) =>
-        series.createPriceLine({
-          price: Number(o.limitPx),
-          color: o.side === 'B' ? '#34d399' : '#f87171',
-          lineWidth: 1,
-          lineStyle: 2,
-          axisLabelVisible: true,
-          title: `${o.side === 'B' ? 'Buy' : 'Sell'} ${o.sz}`,
-        }),
-      );
-    return () => lines.forEach((l) => series.removePriceLine(l));
-  }, [openOrders, market.name]);
+    if (lineDragRef.current) return;
+    const styleOf = (st?: ChartLine['style']) => (st === 'dotted' ? 1 : st === 'dashed' ? 2 : 0);
+    const made = (lines ?? []).map((def) => ({
+      def,
+      pl: series.createPriceLine({
+        price: def.price,
+        color: def.color,
+        lineWidth: def.width ?? 1,
+        lineStyle: styleOf(def.style),
+        axisLabelVisible: true,
+        title: def.title,
+      }),
+    }));
+    linesRef.current = made;
+    return () => {
+      if (disposedRef.current) return;
+      made.forEach((l) => series.removePriceLine(l.pl));
+      if (linesRef.current === made) linesRef.current = [];
+    };
+  }, [lineSig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Chart style: colours, background, grid, and the candle type.
   useEffect(() => {
@@ -949,7 +1155,7 @@ export function ChartPanel({
     const d = draw.drawings.find((x) => x.id === sel.id);
     if (!d) return;
     fn(d);
-    saveDrawings(market.name, draw.drawings);
+    if (!sharedDrawings) saveDrawings(chartKey, draw.drawings);
     draw.update();
     setSel({ ...d });
   };
@@ -958,7 +1164,7 @@ export function ChartPanel({
     if (!draw || !sel) return;
     draw.drawings = draw.drawings.filter((x) => x.id !== sel.id);
     draw.selected = null;
-    saveDrawings(market.name, draw.drawings);
+    if (!sharedDrawings) saveDrawings(chartKey, draw.drawings);
     draw.update();
     setSel(null);
   };
@@ -974,7 +1180,7 @@ export function ChartPanel({
       if (cancel && !te.isNew) return;
       draw.drawings = draw.drawings.filter((x) => x.id !== te.id);
     } else if (!cancel) d.text = text;
-    saveDrawings(market.name, draw.drawings);
+    if (!sharedDrawings) saveDrawings(chartKey, draw.drawings);
     draw.update();
   };
 
@@ -982,7 +1188,7 @@ export function ChartPanel({
   useEffect(() => {
     setSel(null);
     setTextEdit(null);
-  }, [market.name]);
+  }, [chartKey]);
 
   const hint = tool
     ? DRAWING_INFO[tool].place === 'two'
@@ -998,6 +1204,7 @@ export function ChartPanel({
     <div className="chart-wrap">
       <div ref={hostRef} className="chart-host" />
       {status && <div className="chart-status">{status}</div>}
+      {overlay && !status && <div className="chart-overlay">{overlay}</div>}
       {scriptError && !status && <div className="chart-status error-text">{scriptError}</div>}
       {tool && (
         <div className="chart-tool-hint">
@@ -1022,6 +1229,11 @@ export function ChartPanel({
               }}
             >
               Edit text
+            </button>
+          )}
+          {onDrawingAlert && (sel.kind === 'hline' || sel.kind === 'trend') && !sharedDrawings && (
+            <button onClick={() => onDrawingAlert(sel)} title="Alert me when price crosses this line">
+              🔔 Alert
             </button>
           )}
           <button className="danger" onClick={deleteSelected} title="Delete this drawing (Delete key)">
@@ -1049,6 +1261,16 @@ export function ChartPanel({
       )}
     </div>
   );
+}
+
+/** One bar of A divided by B. Open and close are exact; high and low are estimated from B's midpoint. */
+function ratioCandle(a: RawCandle, b: RawCandle): RawCandle {
+  const o = Number(a.o) / Number(b.o);
+  const c = Number(a.c) / Number(b.c);
+  const mid = (Number(b.o) + Number(b.c)) / 2;
+  const h = Math.max(o, c, Number(a.h) / mid);
+  const l = Math.min(o, c, Number(a.l) / mid);
+  return { ...a, o: String(o), c: String(c), h: String(h), l: String(l) };
 }
 
 function setAltData(alt: AltSeries | null, bars: ReturnType<typeof toBar>[]) {

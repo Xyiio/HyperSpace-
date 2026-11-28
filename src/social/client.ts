@@ -1,7 +1,7 @@
 // Supabase client for profiles and trade ideas. Configured with VITE_SUPABASE_URL and
 // VITE_SUPABASE_ANON_KEY (the public anon key; never the service_role key).
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { buildMessage, sha256Hex, type ChatLoginInput, type IdeaInput, type ProfileInput, type ScriptInput, type SignedKind } from '../../supabase/functions/_shared/proof';
+import { buildMessage, sha256Hex, type ChatLoginInput, type IdeaInput, type ProfileInput, type RateInput, type ReferrerInput, type ScriptInput, type SignedKind } from '../../supabase/functions/_shared/proof';
 import { LEADERBOARD_URL, reduceLeaderboard, type Leaderboard, type RawLeaderboardRow } from '../../supabase/functions/_shared/leaderboard';
 
 const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
@@ -61,7 +61,7 @@ async function signedCall<T>(
   fn: string,
   kind: SignedKind,
   address: string,
-  payload: IdeaInput | ProfileInput | ScriptInput | ChatLoginInput,
+  payload: IdeaInput | ProfileInput | ScriptInput | ChatLoginInput | RateInput | ReferrerInput,
   sign: (m: string) => Promise<string>,
   extra: Record<string, unknown> = {},
 ) {
@@ -232,4 +232,134 @@ export async function fetchLeaderboard(): Promise<Leaderboard & { source: 'backe
   const { leaderboardRows } = (await r.json()) as { leaderboardRows: RawLeaderboardRow[] };
   lbCache = reduceLeaderboard(leaderboardRows);
   return { ...lbCache, source: 'direct' };
+}
+
+// ---------- Wallet session (shared by chat, alerts sync and Telegram) ----------
+
+/** The chat sign-in doubles as a general wallet session for token-authenticated calls. */
+export const walletSession = chatSession;
+export const walletLogin = chatLogin;
+
+async function withSession<T>(address: string, fn: string, body: Record<string, unknown>): Promise<T> {
+  const s = chatSession(address);
+  if (!s) throw new Error('Sign in with your wallet first.');
+  try {
+    return await call<T>(fn, { token: s.token, ...body });
+  } catch (e) {
+    if (/sign in again/i.test((e as Error).message)) chatLogout(address);
+    throw e;
+  }
+}
+
+// ---------- Alerts and Telegram ----------
+
+export interface AlertSyncStatus {
+  telegramLinked: boolean;
+  /** When the server last evaluated alerts (its cron job); null if it never has. */
+  lastRun: string | null;
+  /** Alert id → when the server last fired it. */
+  fired: Record<string, number>;
+}
+
+export const syncAlertsRemote = (address: string, alerts: unknown[] | null) => withSession<AlertSyncStatus>(address, 'alerts-sync', alerts ? { alerts } : {});
+export const telegramLink = (address: string) => withSession<{ code: string; bot: string | null }>(address, 'telegram-link', {});
+export const telegramUnlink = (address: string) => withSession<{ ok: true }>(address, 'telegram-link', { unlink: true });
+export const telegramSend = (address: string, title: string, body: string, link?: string) =>
+  withSession<{ ok: true }>(address, 'telegram-send', { title, body, link: link ? `${location.origin}${location.pathname}${link}` : undefined });
+
+// ---------- Ratings and creators ----------
+
+export interface CreatorStats {
+  author: string;
+  scripts: number;
+  installs: number;
+  ratings: number;
+  avg_rating: number | null;
+}
+
+export async function listCreators(): Promise<CreatorStats[]> {
+  if (!supabase) return [];
+  const { data, error } = await supabase.from('creator_stats').select('*').order('installs', { ascending: false }).limit(100);
+  if (error) throw error;
+  return (data as CreatorStats[]).map((c) => ({ ...c, avg_rating: c.avg_rating === null ? null : Number(c.avg_rating) }));
+}
+
+export async function scriptRatings(): Promise<Map<string, { avg: number; count: number }>> {
+  const map = new Map<string, { avg: number; count: number }>();
+  if (!supabase) return map;
+  const { data } = await supabase.from('script_rating_stats').select('*');
+  (data as { script_id: string; avg_rating: number; ratings: number }[] | null)?.forEach((r) => map.set(r.script_id, { avg: Number(r.avg_rating), count: r.ratings }));
+  return map;
+}
+
+export const rateScript = (address: string, scriptId: string, stars: number, sign: (m: string) => Promise<string>) =>
+  signedCall<{ ok: true }>('rate-script', 'rate-script', address, { scriptId, stars }, sign);
+
+// ---------- Idea scorecards ----------
+
+export interface Scorecard {
+  author: string;
+  ideas: number;
+  resolved: number;
+  targets: number;
+  stops: number;
+  hit_rate: number | null;
+  avg_move: number | null;
+}
+
+export async function getScorecards(addresses: string[]): Promise<Map<string, Scorecard>> {
+  const map = new Map<string, Scorecard>();
+  if (!supabase || !addresses.length) return map;
+  const { data } = await supabase.from('idea_scorecards').select('*').in('author', [...new Set(addresses.map((a) => a.toLowerCase()))]);
+  (data as Scorecard[] | null)?.forEach((s) => map.set(s.author, { ...s, hit_rate: s.hit_rate === null ? null : Number(s.hit_rate), avg_move: s.avg_move === null ? null : Number(s.avg_move) }));
+  return map;
+}
+
+// ---------- Referrals ----------
+
+export const setReferrer = (address: string, referrer: string, sign: (m: string) => Promise<string>) =>
+  signedCall<{ ok: true }>('set-referrer', 'set-referrer', address, { referrer }, sign);
+
+export interface ReferralStats {
+  referrer: string;
+  sharePct: number;
+  referees: { address: string; joined: string; builderFees: number; volume: number }[];
+  totalFees: number;
+  earned: number;
+  updatedAt: string;
+}
+
+export const referralStats = (address: string) => call<ReferralStats>('referral-stats', { address: address.toLowerCase() });
+
+export async function myReferrer(address: string): Promise<string | null> {
+  if (!supabase) return null;
+  const { data } = await supabase.from('referrals').select('referrer').eq('referee', address.toLowerCase()).maybeSingle();
+  return (data as { referrer: string } | null)?.referrer ?? null;
+}
+
+// ---------- Points ----------
+
+export interface PointsRow {
+  address: string;
+  ideas: number;
+  targets: number;
+  scripts: number;
+  installs: number;
+  ratings_given: number;
+  referrals: number;
+  trading: number;
+  total: number;
+}
+
+export async function pointsBoard(limit = 100): Promise<PointsRow[]> {
+  if (!supabase) return [];
+  const { data, error } = await supabase.from('points').select('*').order('total', { ascending: false }).limit(limit);
+  if (error) throw error;
+  return (data as PointsRow[]).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, k === 'address' ? v : Number(v)])) as unknown as PointsRow);
+}
+
+export async function myPoints(address: string): Promise<PointsRow | null> {
+  if (!supabase) return null;
+  const { data } = await supabase.from('points').select('*').eq('address', address.toLowerCase()).maybeSingle();
+  return (data as PointsRow | null) ?? null;
 }

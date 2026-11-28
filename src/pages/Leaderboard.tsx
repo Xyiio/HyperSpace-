@@ -4,6 +4,7 @@ import { fetchLeaderboard } from '../social/client';
 import { LB_WINDOWS, MIN_ROI_ACCOUNT, type Leaderboard as LB, type LbWindow } from '../../supabase/functions/_shared/leaderboard';
 import { fmtCompact, fmtUsd, shortAddr } from '../hl/stats';
 import { errorText } from '../wallet/WalletContext';
+import { WatchButton } from '../social/badges';
 
 const WINDOW_LABEL: Record<LbWindow, string> = { day: '24 hours', week: '7 days', month: '30 days', allTime: 'All time' };
 
@@ -96,7 +97,8 @@ export function Leaderboard({ onRoute }: { onRoute: (h: string) => void }) {
                 <td>
                   <button className="link small" onClick={() => onRoute(`#/trade/BTC?wallet=${t.address}`)}>
                     Fills on chart
-                  </button>
+                  </button>{' '}
+                  <WatchButton address={t.address} label={t.name ?? undefined} />
                 </td>
               </tr>
             ))}

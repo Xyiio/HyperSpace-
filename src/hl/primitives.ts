@@ -28,6 +28,7 @@ export interface BigTrade {
   px: number;
   notional: number;
   buy: boolean;
+  liq?: boolean; // one side was Hyperliquid's liquidator
 }
 
 /** Shared time→x mapping for primitives attached to a candle series. */
@@ -189,10 +190,17 @@ export class TradeBubblesPrimitive extends BasePrimitive {
         ctx.beginPath();
         ctx.arc(x, y, r, 0, Math.PI * 2);
         ctx.fillStyle = t.buy ? 'rgba(52,211,153,0.35)' : 'rgba(248,113,113,0.35)';
-        ctx.strokeStyle = t.buy ? 'rgba(52,211,153,0.95)' : 'rgba(248,113,113,0.95)';
-        ctx.lineWidth = 1;
+        ctx.strokeStyle = t.liq ? 'rgba(250,204,21,1)' : t.buy ? 'rgba(52,211,153,0.95)' : 'rgba(248,113,113,0.95)';
+        ctx.lineWidth = t.liq ? 2.5 : 1;
         ctx.fill();
         ctx.stroke();
+        if (t.liq && r >= 8) {
+          ctx.fillStyle = '#facc15';
+          ctx.font = 'bold 9px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('LIQ', x, y + 3);
+          ctx.textAlign = 'left';
+        }
       }
     });
   }

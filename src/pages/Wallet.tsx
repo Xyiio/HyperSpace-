@@ -1,3 +1,4 @@
+import { WatchButton } from '../social/badges';
 import { useEffect, useMemo, useState } from 'react';
 import {
   fetchClearinghouse,
@@ -83,7 +84,8 @@ export function Wallet({ address, onRoute }: { address: string | null; onRoute: 
                 ✓ Verified on-chain · read from Hyperliquid at {new Date(data.fetchedAt).toLocaleString()} ·{' '}
                 <a href={`https://app.hyperliquid.xyz/explorer/address/${address}`} target="_blank" rel="noreferrer">
                   explorer
-                </a>
+                </a>{' '}
+                · <WatchButton address={address} />
               </div>
             </div>
             <div className="seg">

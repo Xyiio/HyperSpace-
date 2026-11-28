@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getProfiles, listIdeas, saveProfile, socialEnabled, type Idea, type Profile } from '../social/client';
+import { getProfiles, getScorecards, listIdeas, saveProfile, socialEnabled, type Idea, type Profile, type Scorecard } from '../social/client';
 import { validateProfile } from '../../supabase/functions/_shared/proof';
 import { errorText, useWallet } from '../wallet/WalletContext';
 import { IdeaCard } from './IdeaCard';
@@ -49,6 +49,7 @@ export function WalletSocial({ address, onRoute }: { address: string; onRoute: (
           }}
         />
       )}
+      <IdeaScorecard address={address} ideas={ideas.length} />
       <h3>Trade ideas ({ideas.length})</h3>
       {ideas.length === 0 ? (
         <div className="muted small">This wallet has not posted any ideas.</div>
@@ -100,5 +101,48 @@ function ProfileForm({ initial, onDone }: { initial: Profile | null; onDone: (sa
         {err && <span className="warn-text">{err}</span>}
       </div>
     </form>
+  );
+}
+
+/** Track record of this wallet's ideas: how many hit their target before their stop. */
+function IdeaScorecard({ address, ideas }: { address: string; ideas: number }) {
+  const [card, setCard] = useState<Scorecard | null | undefined>(undefined);
+  useEffect(() => {
+    getScorecards([address])
+      .then((m) => setCard(m.get(address.toLowerCase()) ?? null))
+      .catch(() => setCard(null));
+  }, [address]);
+  if (!ideas || card === undefined) return null;
+  if (!card || !card.resolved)
+    return <div className="muted small">Idea scorecard: no ideas have resolved yet (an idea resolves when price reaches its target or its stop).</div>;
+  const rate = card.hit_rate ?? card.targets / card.resolved;
+  return (
+    <div className="cards">
+      <div className="card">
+        <small className="muted">Ideas posted</small>
+        {card.ideas}
+      </div>
+      <div className="card">
+        <small className="muted">Hit target</small>
+        <span className="up">{card.targets}</span>
+      </div>
+      <div className="card">
+        <small className="muted">Stopped out</small>
+        <span className="down">{card.stops}</span>
+      </div>
+      <div className="card">
+        <small className="muted">Hit rate</small>
+        {(rate * 100).toFixed(0)}%
+      </div>
+      {card.avg_move !== null && (
+        <div className="card">
+          <small className="muted">Avg move in idea's direction</small>
+          <span className={card.avg_move >= 0 ? 'up' : 'down'}>
+            {card.avg_move >= 0 ? '+' : ''}
+            {(card.avg_move * 100).toFixed(1)}%
+          </span>
+        </div>
+      )}
+    </div>
   );
 }

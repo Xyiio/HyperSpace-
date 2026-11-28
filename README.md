@@ -86,3 +86,54 @@ Without those env vars the Ideas page shows a "not connected" note and the rest 
 - **Community** (`#/community`): live chat channels plus the trade-ideas feed. Chat sign-in is one wallet signature that lasts 7 days.
 
 Backend for these: run `supabase db push` (this applies `0002_scripts_chat_leaderboard.sql`), then `supabase functions deploy publish-script chat-login chat-post leaderboard`.
+
+## Trader toolkit (wishlist)
+
+**Trading** (Chart page, `#/trade/<coin>`)
+
+- Order ticket: limit, market, scale (ladder of up to 50 orders, even or weighted) and TWAP. Bracket orders attach a take-profit and stop-loss in the same request. Size by dollars or by **risk**: enter the stop and how much you are willing to lose, and the size is worked out for you. The ticket shows the loss at the stop, the reward-to-risk and the estimated liquidation price before you send.
+- Chart trading: open orders, TP/SL, your entry and the liquidation price are lines on the chart. Drag an order or TP/SL line to move it (mainnet asks you to confirm the move).
+- Positions: close, close all, reverse, cancel all, set TP/SL on a whole position, TWAP progress with stop, and a share card for any trade.
+- Hotkeys (off by default, set them in the ticket): Shift+B buy, Shift+S sell, Shift+C close, Shift+R reverse, Shift+X cancel all.
+- Sub-accounts and vaults you lead: pick which one to trade as from the wallet menu.
+- **Paper trading**: tick "Paper trading" in the ticket or wallet menu to practice with $10,000 of pretend money on live prices. No wallet needed. Paper trades never reach Hyperliquid and earn no points.
+
+**Charts**
+
+- New indicators: cumulative volume delta, funding rate and open interest panes, and the anchored VWAP drawing tool (key V).
+- Ratio charts (e.g. ETH/BTC) from the compare box in the market bar, plus the perp's premium over its spot pair.
+- Layouts of 1, 2 or 4 charts, saved by name.
+- Share a chart as an image, or as a link that opens the same market, timeframe and drawings.
+- Liquidations by Hyperliquid's liquidator show as yellow "LIQ" bubbles.
+
+**Markets** (`#/markets`): screener (OI change, volume spike, funding, perp vs spot, new and OI-capped markets), funding scanner against Binance and Bybit, open-interest movers (Hyperliquid has no OI history API, so HyperSpace records it locally while it is open), a whale and liquidation feed, and spot and HIP-3 deploy auctions with the newest listings.
+
+**Alerts** (`#/alerts`): price, drawn line or trend line (🔔 in the drawing edit bar), funding rate, big trades, new listings, and **wallet watch** (☆ Watch on the leaderboard or any wallet page). Delivered as an in-app toast, a browser notification and a sound while HyperSpace is open, and to **Telegram** around the clock once the backend below is deployed.
+
+**Social and rewards**: verified 30-day PnL badges next to names in chat and ideas, idea scorecards (hit rate from resolved ideas), indicator ratings and a top-creators board, a referral link that shares the builder fee (`VITE_REFERRAL_SHARE_PCT`, default 20, paid out manually), and points (`#/rewards`), which are an activity score only, not a token or a promise of one. Premium tiers are priced in HYPERSPACE and stay switched off until the token launches (`TOKEN_LIVE` in `src/token/premium.ts`).
+
+### Backend for the toolkit
+
+1. `supabase db push` (applies `0003_alerts_rewards.sql`).
+2. Deploy the functions:
+   `supabase functions deploy alerts-sync telegram-link telegram-send rate-script set-referrer referral-stats`
+   `supabase functions deploy telegram-webhook alerts-run score-activity --no-verify-jwt`
+3. Secrets (`supabase secrets set NAME=value`):
+   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`: create a bot with @BotFather.
+   - `TELEGRAM_WEBHOOK_SECRET`: any random string. Then register the webhook:
+     `curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<ref>.supabase.co/functions/v1/telegram-webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>"`
+   - `CRON_SECRET`: any random string, sent by the scheduled jobs.
+   - `APP_URL`: the public address of the app, for links in Telegram messages.
+   - `BUILDER_ADDRESS` and `REFERRAL_SHARE_PCT`: for referral and trading-points accounting.
+4. Schedule the jobs (Supabase dashboard, Integrations, Cron, or `pg_cron` with `pg_net`):
+   - `alerts-run` every minute.
+   - `score-activity` every hour.
+   Both are POST requests with the header `x-cron-secret: <CRON_SECRET>`. For example:
+   ```sql
+   select cron.schedule('alerts-run', '* * * * *', $$
+     select net.http_post('https://<ref>.supabase.co/functions/v1/alerts-run', '{}'::jsonb, '{}'::jsonb,
+       jsonb_build_object('x-cron-secret', '<CRON_SECRET>'));
+   $$);
+   ```
+
+Big-trade alerts need a live trade stream, so only an open browser sends them (it forwards them to Telegram if linked). All other alerts run on the server once the cron job is active; the browser then stops sending its own Telegram copies, so nothing arrives twice.
