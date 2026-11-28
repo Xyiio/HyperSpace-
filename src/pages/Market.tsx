@@ -3,12 +3,24 @@ import { useEffect, useMemo, useState } from 'react';
 import { EXAMPLES } from '../script/hyperscript';
 import { useScriptLibrary, type SavedScript } from '../script/library';
 import { ScriptPreview } from '../components/ScriptPreview';
-import { getProfiles, getScriptCode, listScripts, socialEnabled, type MarketScript, type Profile } from '../social/client';
+import {
+  getProfiles,
+  getScriptCode,
+  listCreators,
+  listScripts,
+  rateScript,
+  scriptRatings,
+  socialEnabled,
+  type CreatorStats,
+  type MarketScript,
+  type Profile,
+} from '../social/client';
 import { shortAddr } from '../hl/stats';
-import { errorText } from '../wallet/WalletContext';
+import { errorText, useWallet } from '../wallet/WalletContext';
 import { addScriptToChart } from './Studio';
 
 type Filter = 'all' | 'free' | 'paid';
+type Sort = 'installs' | 'rating' | 'new';
 
 export function Market({ onRoute }: { onRoute: (h: string) => void }) {
   const [library, setLibrary] = useScriptLibrary();
@@ -19,6 +31,37 @@ export function Market({ onRoute }: { onRoute: (h: string) => void }) {
   const [q, setQ] = useState('');
   const [preview, setPreview] = useState<{ id: string; code: string } | null>(null);
   const [msg, setMsg] = useState<Record<string, string>>({});
+  const [ratings, setRatings] = useState<Map<string, { avg: number; count: number }>>(new Map());
+  const [creators, setCreators] = useState<CreatorStats[]>([]);
+  const [sort, setSort] = useState<Sort>('installs');
+  const [rating, setRating] = useState<string | null>(null);
+  const w = useWallet();
+
+  const loadRatings = () => scriptRatings().then(setRatings).catch(() => {});
+  useEffect(() => {
+    if (!socialEnabled) return;
+    void loadRatings();
+    listCreators()
+      .then(async (c) => {
+        setCreators(c);
+        const extra = await getProfiles(c.map((x) => x.author));
+        setProfiles((p) => new Map([...extra, ...p]));
+      })
+      .catch(() => {});
+  }, []);
+
+  const rate = async (s: MarketScript, stars: number) => {
+    if (!w.address) return setMsg((m) => ({ ...m, [s.id]: 'Connect a wallet to rate.' }));
+    setMsg((m) => ({ ...m, [s.id]: 'Check your wallet to sign (free)…' }));
+    try {
+      await rateScript(w.address, s.id, stars, w.signMessage);
+      setRating(null);
+      setMsg((m) => ({ ...m, [s.id]: `Rated ${stars}★. Thanks.` }));
+      void loadRatings();
+    } catch (e) {
+      setMsg((m) => ({ ...m, [s.id]: errorText(e) }));
+    }
+  };
 
   useEffect(() => {
     if (!socialEnabled) {
@@ -35,12 +78,15 @@ export function Market({ onRoute }: { onRoute: (h: string) => void }) {
 
   const shown = useMemo(() => {
     const term = q.trim().toLowerCase();
-    return (scripts ?? []).filter(
+    const list = (scripts ?? []).filter(
       (s) =>
         (filter === 'all' || (filter === 'free' ? s.price_hs === 0 : s.price_hs > 0)) &&
         (!term || s.name.toLowerCase().includes(term) || s.description.toLowerCase().includes(term)),
     );
-  }, [scripts, filter, q]);
+    if (sort === 'rating') return [...list].sort((a, b) => (ratings.get(b.id)?.avg ?? 0) - (ratings.get(a.id)?.avg ?? 0));
+    if (sort === 'installs') return [...list].sort((a, b) => b.installs - a.installs);
+    return list;
+  }, [scripts, filter, q, sort, ratings]);
 
   const installed = (marketId: string) => library.find((s) => s.origin === 'market' && s.marketId === marketId);
 
@@ -115,9 +161,46 @@ export function Market({ onRoute }: { onRoute: (h: string) => void }) {
         ))}
       </div>
 
+      {creators.length > 0 && (
+        <section className="card-block">
+          <h3>Top creators</h3>
+          <table className="lb-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Creator</th>
+                <th>Indicators</th>
+                <th>Installs</th>
+                <th>Rating</th>
+              </tr>
+            </thead>
+            <tbody>
+              {creators.slice(0, 10).map((c, i) => (
+                <tr key={c.author}>
+                  <td className="muted">{i + 1}</td>
+                  <td>
+                    <button className="link" onClick={() => onRoute(`#/wallet/${c.author}`)}>
+                      {profiles.get(c.author)?.display_name ?? shortAddr(c.author)}
+                    </button>
+                  </td>
+                  <td>{c.scripts}</td>
+                  <td>{c.installs.toLocaleString()}</td>
+                  <td>{c.avg_rating ? <Stars r={{ avg: c.avg_rating, count: c.ratings }} /> : <span className="muted">–</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
       <div className="market-tools">
         <h3>From the community</h3>
         <input placeholder="Search indicators" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select value={sort} onChange={(e) => setSort(e.target.value as Sort)} title="Sort">
+          <option value="installs">Most installed</option>
+          <option value="rating">Top rated</option>
+          <option value="new">Newest</option>
+        </select>
         <div className="seg">
           {(['all', 'free', 'paid'] as Filter[]).map((f) => (
             <button key={f} className={filter === f ? 'on' : ''} onClick={() => setFilter(f)}>
@@ -155,7 +238,11 @@ export function Market({ onRoute }: { onRoute: (h: string) => void }) {
                     <button className="link" onClick={() => onRoute(`#/wallet/${s.author}`)}>
                       {author}
                     </button>{' '}
-                    · v{s.version} · {s.installs.toLocaleString()} installs
+                    · v{s.version} · {s.installs.toLocaleString()} installs ·{' '}
+                    <Stars r={ratings.get(s.id)} />{' '}
+                    <button className="link small" onClick={() => setRating(rating === s.id ? null : s.id)}>
+                      Rate
+                    </button>
                   </span>
                   <span className="mc-actions">
                     {s.price_hs > 0 ? (
@@ -175,6 +262,16 @@ export function Market({ onRoute }: { onRoute: (h: string) => void }) {
                     )}
                   </span>
                 </div>
+                {rating === s.id && (
+                  <div className="row small">
+                    Your rating:
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button key={n} className="link" onClick={() => void rate(s, n)}>
+                        {'★'.repeat(n)}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {msg[s.id] && <div className="small muted">{msg[s.id]}</div>}
               </div>
             );
@@ -182,5 +279,16 @@ export function Market({ onRoute }: { onRoute: (h: string) => void }) {
         </div>
       )}
     </div>
+  );
+}
+
+function Stars({ r }: { r?: { avg: number; count: number } }) {
+  if (!r || !r.count) return <span className="muted">no ratings</span>;
+  const full = Math.round(r.avg);
+  return (
+    <span className="stars" title={`${r.avg.toFixed(2)} from ${r.count} rating${r.count === 1 ? '' : 's'}`}>
+      {'★'.repeat(full)}
+      {'☆'.repeat(5 - full)} <span className="muted">({r.count})</span>
+    </span>
   );
 }

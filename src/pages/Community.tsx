@@ -1,4 +1,5 @@
 // Community: live chat channels and the trade-ideas feed.
+import { PnlBadge } from '../social/badges';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Market } from '../hl/api';
 import { CHAT_CHANNELS, MAX_CHAT_CHARS } from '../../supabase/functions/_shared/proof';
@@ -132,6 +133,7 @@ function Chat({ markets, channel, onRoute }: { markets: Market[]; channel: strin
                       <button className="link" onClick={() => onRoute(`#/wallet/${m.author}`)} title={`${m.author} · see verified PnL`}>
                         {name}
                       </button>
+                      <PnlBadge address={m.author} />
                       <span className="muted small">{new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                     </div>
                   )}

@@ -6,13 +6,18 @@
 //      and, when a builder address is configured, `approveBuilderFee`. Both are one-time signatures.
 //   3. Orders and cancels are signed locally by the agent key, so there is no wallet pop-up per order.
 // An agent key can place and cancel orders but cannot withdraw or transfer funds.
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createWalletClient, custom, getAddress, type WalletClient } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { ExchangeClient, HttpTransport, InfoClient } from '@nktkas/hyperliquid';
 import { IS_TESTNET, NETWORK } from '../hl/network';
 import { BUILDER_ADDRESS, BUILDER_FEE_TENTHS_BP } from '../hl/order';
 import { listWallets, onWalletsChanged, type WalletInfo } from './eip1193';
+import { fetchLeadingVaults, fetchSubAccounts, type Market } from '../hl/api';
+import type { AnyOrderWire, Grouping } from '../hl/orders';
+import { hlSocket } from '../hl/ws';
+import * as paperEngine from '../paper/engine';
+import type { PaperState } from '../paper/engine';
 
 export const AGENT_NAME = 'HyperSpace';
 const LAST_WALLET = 'hs.lastWallet';
@@ -39,16 +44,49 @@ const store = {
   },
 };
 
-export interface OrderWire {
-  a: number;
-  b: boolean;
-  p: string;
-  s: string;
-  r: boolean;
-  t: { limit: { tif: 'Gtc' | 'Ioc' | 'Alo' } };
-}
+export type OrderWire = AnyOrderWire;
 
 export type OrderResult = { kind: 'resting'; oid: number } | { kind: 'filled'; oid: number; avgPx: string; totalSz: string } | { kind: 'error'; message: string };
+export type TwapResult = { kind: 'running'; twapId: number } | { kind: 'error'; message: string };
+export interface TwapInput {
+  a: number;
+  b: boolean;
+  s: string;
+  r: boolean;
+  m: number; // minutes, 5 to 1440
+  t: boolean; // randomize slice timing
+}
+
+/** An account the agent key can trade for: the main wallet, a sub-account, or a vault it leads. */
+export interface TradeAccount {
+  address: string;
+  name: string;
+  kind: 'main' | 'sub' | 'vault';
+}
+
+const PAPER_KEY = `hs.paper.${NETWORK}`;
+const PAPER_ON = 'hs.paperOn';
+const tradeAccountKey = (user: string) => `hs.tradeAccount.${NETWORK}.${user.toLowerCase()}`;
+
+function loadPaper(): PaperState {
+  try {
+    const raw = localStorage.getItem(PAPER_KEY);
+    const s = raw ? (JSON.parse(raw) as PaperState) : null;
+    return s?.v === 1 ? s : paperEngine.newPaper();
+  } catch {
+    return paperEngine.newPaper();
+  }
+}
+
+/** Reads the status of each order in an exchange response. */
+function statusesOf(res: { response: { data: { statuses: unknown[] } } }): OrderResult[] {
+  return (res.response.data.statuses as any[]).map((st): OrderResult => {
+    if (st && 'resting' in st) return { kind: 'resting', oid: st.resting.oid };
+    if (st && 'filled' in st) return { kind: 'filled', oid: st.filled.oid, avgPx: st.filled.avgPx, totalSz: st.filled.totalSz };
+    if (st === 'waitingForFill' || st === 'waitingForTrigger') return { kind: 'resting', oid: 0 };
+    return { kind: 'error', message: st?.error ?? 'Unexpected response from Hyperliquid.' };
+  });
+}
 
 interface WalletState {
   wallets: WalletInfo[];
@@ -67,7 +105,24 @@ interface WalletState {
   disconnect: () => void;
   enableTrading: () => Promise<void>;
   placeOrder: (order: OrderWire) => Promise<OrderResult>;
+  /** Several orders in one signed request (brackets use `normalTpsl`, ladders `na`). */
+  placeOrders: (orders: OrderWire[], grouping?: Grouping) => Promise<OrderResult[]>;
   cancelOrder: (asset: number, oid: number) => Promise<void>;
+  cancelOrders: (cancels: { a: number; o: number }[]) => Promise<void>;
+  /** Replace a resting order (new price or trigger). */
+  modifyOrder: (oid: number, order: OrderWire) => Promise<OrderResult>;
+  twapOrder: (t: TwapInput) => Promise<TwapResult>;
+  twapCancel: (asset: number, twapId: number) => Promise<void>;
+  /** Accounts this wallet can trade: main, sub-accounts and vaults it leads. */
+  accounts: TradeAccount[];
+  /** The account orders go to and the account panel shows (lower-case), or null when not connected. */
+  tradeAccount: string | null;
+  setTradeAccount: (address: string) => void;
+  /** Paper trading: practice on live prices with pretend money. No wallet needed. */
+  paper: boolean;
+  setPaper: (on: boolean) => void;
+  paperState: PaperState;
+  resetPaper: () => void;
   /** EIP-191 personal_sign with the connected main wallet. */
   signMessage: (message: string) => Promise<`0x${string}`>;
   /** Bumped after every order or cancel so account views refetch. */
@@ -89,7 +144,7 @@ export function errorText(e: unknown): string {
   return err?.shortMessage ?? err?.message ?? String(e);
 }
 
-export function WalletProvider({ children }: { children: ReactNode }) {
+export function WalletProvider({ children, markets }: { children: ReactNode; markets: Market[] }) {
   const [wallets, setWallets] = useState<WalletInfo[]>(() => listWallets());
   const [wallet, setWallet] = useState<WalletInfo | null>(null);
   const [address, setAddress] = useState<`0x${string}` | null>(null);
@@ -101,6 +156,13 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [checking, setChecking] = useState(false);
   const [enabling, setEnabling] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [accounts, setAccounts] = useState<TradeAccount[]>([]);
+  const [tradeAccount, setTradeAccountState] = useState<string | null>(null);
+  const [paper, setPaperState] = useState(() => store.get(PAPER_ON) === '1');
+  const [paperState, setPaperStateValue] = useState<PaperState>(loadPaper);
+  const paperRef = useRef(paperState);
+  const marketsRef = useRef(markets);
+  marketsRef.current = markets;
 
   useEffect(() => onWalletsChanged(() => setWallets(listWallets())), []);
 
@@ -188,6 +250,110 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     if (address) void refreshTrading(address);
   }, [address, refreshTrading]);
 
+  // Sub-accounts and vaults this wallet leads.
+  useEffect(() => {
+    setAccounts([]);
+    if (!address) {
+      setTradeAccountState(null);
+      return;
+    }
+    const main = address.toLowerCase();
+    const saved = store.get(tradeAccountKey(main));
+    setTradeAccountState(saved ?? main);
+    let alive = true;
+    Promise.all([fetchSubAccounts(main).catch(() => []), fetchLeadingVaults(main)]).then(([subs, vaults]) => {
+      if (!alive) return;
+      const list: TradeAccount[] = [
+        { address: main, name: 'Main account', kind: 'main' },
+        ...subs.map((x) => ({ address: x.subAccountUser.toLowerCase(), name: x.name, kind: 'sub' as const })),
+        ...vaults.map((v) => ({ address: v.address.toLowerCase(), name: v.name, kind: 'vault' as const })),
+      ];
+      setAccounts(list);
+      if (saved && !list.some((a) => a.address === saved)) setTradeAccountState(main);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [address]);
+
+  const setTradeAccount = useCallback(
+    (a: string) => {
+      if (!address) return;
+      store.set(tradeAccountKey(address), a.toLowerCase());
+      setTradeAccountState(a.toLowerCase());
+      setRevision((r) => r + 1);
+    },
+    [address],
+  );
+
+  // Orders for a sub-account or vault are signed by the same agent with `vaultAddress` set.
+  const vaultOpts = useMemo(
+    () => (tradeAccount && address && tradeAccount !== address.toLowerCase() ? { vaultAddress: tradeAccount as `0x${string}` } : undefined),
+    [tradeAccount, address],
+  );
+
+  // ---------- Paper trading ----------
+  const savePaper = useCallback((s: PaperState) => {
+    paperRef.current = s;
+    setPaperStateValue(s);
+    try {
+      localStorage.setItem(PAPER_KEY, JSON.stringify(s));
+    } catch {
+      /* not persisted */
+    }
+  }, []);
+
+  const setPaper = useCallback((on: boolean) => {
+    store.set(PAPER_ON, on ? '1' : null);
+    setPaperState(on);
+    setRevision((r) => r + 1);
+  }, []);
+
+  const resetPaper = useCallback(() => savePaper(paperEngine.newPaper()), [savePaper]);
+
+  const coinByAsset = useCallback((a: number) => {
+    const m = marketsRef.current.find((x) => x.index === a);
+    return m ? { coin: m.name, maxLeverage: m.maxLeverage } : undefined;
+  }, []);
+  const coinByName = useCallback((c: string) => {
+    const m = marketsRef.current.find((x) => x.name === c);
+    return m ? { coin: m.name, maxLeverage: m.maxLeverage } : undefined;
+  }, []);
+
+  // Live mids drive paper fills while paper mode is on.
+  const dexKey = useMemo(() => [...new Set(markets.map((m) => m.dex))].sort().join(','), [markets]);
+  useEffect(() => {
+    if (!paper) return;
+    const dexes = dexKey.split(',');
+    const latest: Record<string, number> = {};
+    for (const m of marketsRef.current) {
+      const mid = Number(m.ctx.midPx ?? m.ctx.markPx);
+      if (mid) latest[m.name] = mid;
+    }
+    savePaper({ ...paperRef.current, mids: { ...latest, ...paperRef.current.mids, ...latest } });
+    let pending = false;
+    const flush = () => {
+      pending = false;
+      const next = paperEngine.tick(paperRef.current, latest, coinByName);
+      if (next !== paperRef.current) savePaper(next);
+    };
+    const unsubs = dexes.map((dex) =>
+      hlSocket.subscribe(dex ? { type: 'allMids', dex } : { type: 'allMids' }, (d: { mids: Record<string, string> }) => {
+        for (const [k, v] of Object.entries(d.mids)) latest[k] = Number(v);
+        if (!pending) {
+          pending = true;
+          window.setTimeout(flush, 250);
+        }
+      }),
+    );
+    // TWAP slices need time to pass even when prices are quiet.
+    const t = window.setInterval(flush, 5000);
+    return () => {
+      unsubs.forEach((u) => u());
+      window.clearInterval(t);
+    };
+  }, [paper, dexKey, savePaper, coinByName]);
+
   const enableTrading = useCallback(async () => {
     if (!walletClient || !address) return;
     setEnabling(true);
@@ -214,38 +380,114 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     }
   }, [walletClient, address, agentReady, builderReady, refreshTrading]);
 
-  const placeOrder = useCallback(
-    async (order: OrderWire): Promise<OrderResult> => {
+  const placeOrders = useCallback(
+    async (orders: OrderWire[], grouping: Grouping = 'na'): Promise<OrderResult[]> => {
+      if (paper) {
+        const { state, results } = paperEngine.place(paperRef.current, orders, grouping, coinByAsset);
+        savePaper(state);
+        setRevision((r) => r + 1);
+        return results;
+      }
+      if (!agentExchange) return orders.map(() => ({ kind: 'error', message: 'Enable trading first.' }));
+      try {
+        const res = await agentExchange.order(
+          {
+            orders: orders as never,
+            grouping,
+            ...(BUILDER_ADDRESS ? { builder: { b: BUILDER_ADDRESS as `0x${string}`, f: BUILDER_FEE_TENTHS_BP } } : {}),
+          },
+          vaultOpts,
+        );
+        return statusesOf(res);
+      } catch (e) {
+        return orders.map(() => ({ kind: 'error', message: errorText(e) }));
+      } finally {
+        setRevision((r) => r + 1);
+      }
+    },
+    [agentExchange, paper, savePaper, coinByAsset, vaultOpts],
+  );
+
+  const placeOrder = useCallback(async (order: OrderWire) => (await placeOrders([order]))[0], [placeOrders]);
+
+  const cancelOrders = useCallback(
+    async (cancels: { a: number; o: number }[]) => {
+      if (cancels.length === 0) return;
+      if (paper) {
+        savePaper(paperEngine.cancel(paperRef.current, cancels.map((c) => c.o)));
+        setRevision((r) => r + 1);
+        return;
+      }
+      if (!agentExchange) throw new Error('Enable trading first.');
+      try {
+        await agentExchange.cancel({ cancels }, vaultOpts);
+      } finally {
+        setRevision((r) => r + 1);
+      }
+    },
+    [agentExchange, paper, savePaper, vaultOpts],
+  );
+
+  const cancelOrder = useCallback((asset: number, oid: number) => cancelOrders([{ a: asset, o: oid }]), [cancelOrders]);
+
+  const modifyOrder = useCallback(
+    async (oid: number, order: OrderWire): Promise<OrderResult> => {
+      if (paper) {
+        const trig = 'trigger' in order.t ? Number(order.t.trigger.triggerPx) : undefined;
+        savePaper(paperEngine.modify(paperRef.current, oid, Number(order.p), trig));
+        setRevision((r) => r + 1);
+        return { kind: 'resting', oid };
+      }
       if (!agentExchange) return { kind: 'error', message: 'Enable trading first.' };
       try {
-        const res = await agentExchange.order({
-          orders: [order],
-          grouping: 'na',
-          ...(BUILDER_ADDRESS ? { builder: { b: BUILDER_ADDRESS as `0x${string}`, f: BUILDER_FEE_TENTHS_BP } } : {}),
-        });
-        const st = res.response.data.statuses[0] as Record<string, any>;
-        if (st && 'resting' in st) return { kind: 'resting', oid: st.resting.oid };
-        if (st && 'filled' in st) return { kind: 'filled', oid: st.filled.oid, avgPx: st.filled.avgPx, totalSz: st.filled.totalSz };
-        return { kind: 'error', message: st?.error ?? 'Unexpected response from Hyperliquid.' };
+        await agentExchange.modify({ oid, order: order as never }, vaultOpts);
+        return { kind: 'resting', oid };
       } catch (e) {
         return { kind: 'error', message: errorText(e) };
       } finally {
         setRevision((r) => r + 1);
       }
     },
-    [agentExchange],
+    [agentExchange, paper, savePaper, vaultOpts],
   );
 
-  const cancelOrder = useCallback(
-    async (asset: number, oid: number) => {
-      if (!agentExchange) throw new Error('Enable trading first.');
+  const twapOrder = useCallback(
+    async (t: TwapInput): Promise<TwapResult> => {
+      if (paper) {
+        const { state, result } = paperEngine.startTwap(paperRef.current, t, coinByAsset);
+        savePaper(state);
+        setRevision((r) => r + 1);
+        return result;
+      }
+      if (!agentExchange) return { kind: 'error', message: 'Enable trading first.' };
       try {
-        await agentExchange.cancel({ cancels: [{ a: asset, o: oid }] });
+        const res = await agentExchange.twapOrder({ twap: t }, vaultOpts);
+        const st = res.response.data.status as Record<string, any>;
+        return 'running' in st ? { kind: 'running', twapId: st.running.twapId } : { kind: 'error', message: st.error ?? 'TWAP was not accepted.' };
+      } catch (e) {
+        return { kind: 'error', message: errorText(e) };
       } finally {
         setRevision((r) => r + 1);
       }
     },
-    [agentExchange],
+    [agentExchange, paper, savePaper, coinByAsset, vaultOpts],
+  );
+
+  const twapCancel = useCallback(
+    async (asset: number, twapId: number) => {
+      if (paper) {
+        savePaper(paperEngine.stopTwap(paperRef.current, twapId));
+        setRevision((r) => r + 1);
+        return;
+      }
+      if (!agentExchange) throw new Error('Enable trading first.');
+      try {
+        await agentExchange.twapCancel({ a: asset, t: twapId }, vaultOpts);
+      } finally {
+        setRevision((r) => r + 1);
+      }
+    },
+    [agentExchange, paper, savePaper, vaultOpts],
   );
 
   const signMessage = useCallback(
@@ -266,12 +508,24 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     builderReady,
     checking,
     enabling,
-    tradingReady: !!address && agentReady && builderReady && !!agentKey,
+    tradingReady: paper || (!!address && agentReady && builderReady && !!agentKey),
     connect: (w) => connect(w),
     disconnect,
     enableTrading,
     placeOrder,
+    placeOrders,
     cancelOrder,
+    cancelOrders,
+    modifyOrder,
+    twapOrder,
+    twapCancel,
+    accounts,
+    tradeAccount,
+    setTradeAccount,
+    paper,
+    setPaper,
+    paperState,
+    resetPaper,
     signMessage,
     revision,
   };

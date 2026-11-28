@@ -1,7 +1,7 @@
 // Server-side helpers for the Supabase Edge Functions (Deno).
 import { verifyMessage } from 'npm:viem@2.58.6';
 import { createClient } from 'npm:@supabase/supabase-js@2.119.2';
-import { MAX_AGE_MS, parseMessage, type ParsedMessage, type SignedKind } from './proof.ts';
+import { MAX_AGE_MS, parseMessage, sha256Hex, type ParsedMessage, type SignedKind } from './proof.ts';
 
 export const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -41,3 +41,28 @@ export async function verifyRequest(req: Request, kind: SignedKind): Promise<Par
   if (!ok) return json({ error: 'Signature does not match the wallet.' }, 401);
   return parsed;
 }
+
+/** The wallet behind a session token from chat-login, or null if missing or expired. */
+export async function sessionAddress(db: ReturnType<typeof admin>, token: unknown): Promise<string | null> {
+  if (typeof token !== 'string' || !token) return null;
+  const { data } = await db.from('chat_sessions').select('address, expires_at').eq('token_hash', await sha256Hex(token)).maybeSingle();
+  return data && Date.parse(data.expires_at) > Date.now() ? (data.address as string) : null;
+}
+
+/** Sends a Telegram message through the HyperSpace bot. Needs the TELEGRAM_BOT_TOKEN secret. */
+export async function telegram(chatId: number | string, text: string): Promise<boolean> {
+  const bot = Deno.env.get('TELEGRAM_BOT_TOKEN');
+  if (!bot) return false;
+  const r = await fetch(`https://api.telegram.org/bot${bot}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+  });
+  return r.ok;
+}
+
+/** Cron-only functions check this shared secret (set CRON_SECRET and send it as x-cron-secret). */
+export const cronAllowed = (req: Request) => {
+  const want = Deno.env.get('CRON_SECRET');
+  return !!want && req.headers.get('x-cron-secret') === want;
+};

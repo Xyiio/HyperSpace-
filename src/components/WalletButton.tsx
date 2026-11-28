@@ -33,12 +33,32 @@ export function WalletButton() {
       <div className="wallet-btn" ref={ref}>
         <button onClick={() => setOpen((o) => !o)}>
           <span className={`dot ${w.tradingReady ? 'open' : 'connecting'}`} /> {shortAddr(w.address)}
+          {w.paper && <span className="badge paper">Paper</span>}
+          {!w.paper && w.tradeAccount && w.tradeAccount !== w.address.toLowerCase() && (
+            <span className="badge">{w.accounts.find((a) => a.address === w.tradeAccount)?.name ?? 'Sub'}</span>
+          )}
         </button>
         {open && (
           <div className="menu">
             <div className="muted small">{w.walletName}</div>
             <div className="mono small">{w.address}</div>
             <div className="small">{w.tradingReady ? 'Trading enabled in this browser' : 'Trading not enabled yet'}</div>
+            {w.accounts.length > 1 && (
+              <label className="small">
+                Trade as
+                <select value={w.tradeAccount ?? ''} onChange={(e) => w.setTradeAccount(e.target.value)}>
+                  {w.accounts.map((a) => (
+                    <option key={a.address} value={a.address}>
+                      {a.name}
+                      {a.kind === 'vault' ? ' (vault)' : a.kind === 'sub' ? ' (sub-account)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label className="small">
+              <input type="checkbox" checked={w.paper} onChange={(e) => w.setPaper(e.target.checked)} /> Paper trading
+            </label>
             <a href={`#/wallet/${w.address.toLowerCase()}`} onClick={() => setOpen(false)}>
               My verified PnL
             </a>

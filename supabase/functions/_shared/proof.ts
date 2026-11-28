@@ -34,14 +34,25 @@ export interface ChatLoginInput {
   purpose: 'chat';
 }
 
-export type SignedKind = 'post-idea' | 'save-profile' | 'publish-script' | 'chat-login';
-type Payload = IdeaInput | ProfileInput | ScriptInput | ChatLoginInput;
+export interface RateInput {
+  scriptId: string;
+  stars: number; // 1 to 5
+}
+
+export interface ReferrerInput {
+  referrer: string; // wallet that shared the link
+}
+
+export type SignedKind = 'post-idea' | 'save-profile' | 'publish-script' | 'chat-login' | 'rate-script' | 'set-referrer';
+type Payload = IdeaInput | ProfileInput | ScriptInput | ChatLoginInput | RateInput | ReferrerInput;
 
 const TITLES: Record<SignedKind, string> = {
   'post-idea': 'post a trade idea',
   'save-profile': 'update my profile',
   'publish-script': 'publish an indicator',
   'chat-login': 'sign in to chat',
+  'rate-script': 'rate an indicator',
+  'set-referrer': 'confirm who referred me',
 };
 
 /** The exact text the wallet signs. The JSON payload is on its own last line. */
@@ -146,3 +157,21 @@ export const CHAT_CHANNELS = [
   { id: 'scripts', name: 'scripts', about: 'HyperScript help and indicator ideas' },
 ] as const;
 export const MAX_CHAT_CHARS = 500;
+
+export function validateRating(p: unknown): RateInput | string {
+  const o = p as Record<string, unknown>;
+  if (!o || typeof o !== 'object') return 'Missing rating.';
+  const scriptId = String(o.scriptId ?? '');
+  if (!/^[0-9a-f-]{36}$/.test(scriptId)) return 'Invalid script id.';
+  const stars = Number(o.stars);
+  if (!Number.isInteger(stars) || stars < 1 || stars > 5) return 'Stars must be 1 to 5.';
+  return { scriptId, stars };
+}
+
+export function validateReferrer(p: unknown, self: string): ReferrerInput | string {
+  const o = p as Record<string, unknown>;
+  const referrer = String(o?.referrer ?? '').toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(referrer)) return 'Invalid referrer wallet.';
+  if (referrer === self.toLowerCase()) return 'You cannot refer yourself.';
+  return { referrer };
+}

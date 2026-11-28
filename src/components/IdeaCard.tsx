@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { fetchFillsSince, info, type Market, type RawCandle } from '../hl/api';
 import { fmtCompact, fmtUsd, shortAddr } from '../hl/stats';
-import type { Idea, Profile } from '../social/client';
+import type { Idea, Profile, Scorecard } from '../social/client';
+import { HitRateBadge, PnlBadge } from '../social/badges';
 
 interface Outcome {
   movePct: number; // price move since posting, in the idea's direction
@@ -39,7 +40,19 @@ async function evaluate(idea: Idea, last: number): Promise<Outcome> {
   return { movePct: move, hit, fills: mine.length, realized: mine.reduce((s, f) => s + Number(f.closedPnl) - Number(f.fee), 0) };
 }
 
-export function IdeaCard({ idea, profile, market, onRoute }: { idea: Idea; profile?: Profile; market?: Market; onRoute: (h: string) => void }) {
+export function IdeaCard({
+  idea,
+  profile,
+  market,
+  scorecard,
+  onRoute,
+}: {
+  idea: Idea;
+  profile?: Profile;
+  market?: Market;
+  scorecard?: Scorecard;
+  onRoute: (h: string) => void;
+}) {
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const last = market ? Number(market.ctx.markPx) : idea.mark_at_post;
 
@@ -64,6 +77,8 @@ export function IdeaCard({ idea, profile, market, onRoute }: { idea: Idea; profi
         <button className="link" onClick={() => onRoute(`#/wallet/${idea.author}`)}>
           {name}
         </button>
+        <PnlBadge address={idea.author} />
+        <HitRateBadge card={scorecard} />
         <span className="muted small">{new Date(idea.created_at).toLocaleString()}</span>
         <span className="verified small" title={idea.author}>
           ✓ signed by {shortAddr(idea.author)}

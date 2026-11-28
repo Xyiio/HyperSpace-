@@ -3,10 +3,11 @@
 // interval changes and reloads.
 import { BasePrimitive, TimeMapper } from './primitives';
 import type { IPrimitivePaneRenderer } from 'lightweight-charts';
+import { anchoredVwap, type Candle } from './indicators';
 
 type Target = Parameters<IPrimitivePaneRenderer['draw']>[0];
 
-export type DrawingKind = 'trend' | 'hline' | 'rect' | 'fib' | 'pen' | 'text' | 'arrowUp' | 'arrowDown';
+export type DrawingKind = 'trend' | 'hline' | 'rect' | 'fib' | 'pen' | 'text' | 'arrowUp' | 'arrowDown' | 'avwap';
 export interface Pt {
   t: number;
   p: number;
@@ -33,6 +34,7 @@ export const DRAWING_INFO: Record<DrawingKind, { label: string; icon: string; pl
   text: { label: 'Text box', icon: 'Aa', place: 'one', key: 'X' },
   arrowUp: { label: 'Arrow up', icon: '▲', place: 'one', key: 'U' },
   arrowDown: { label: 'Arrow down', icon: '▼', place: 'one', key: 'D' },
+  avwap: { label: 'Anchored VWAP (click a candle)', icon: '⚓', place: 'one', key: 'V' },
 };
 
 export const DRAW_COLORS = ['#f5c542', '#26c6da', '#a78bfa', '#f472b6', '#34d399', '#f87171', '#e5e7eb', '#fb923c'];
@@ -78,6 +80,8 @@ export class DrawingsPrimitive extends BasePrimitive {
   draft: Drawing | null = null; // being placed, follows the cursor
   selected: string | null = null;
   decimals = 2;
+  /** Candles on the chart, for anchored VWAPs. */
+  candles: Candle[] = [];
   private measure: CanvasRenderingContext2D | null = null;
 
   constructor(mapper: TimeMapper) {
@@ -138,6 +142,11 @@ export class DrawingsPrimitive extends BasePrimitive {
         case 'arrowDown':
           if (Math.abs(px - x1) <= 10 && py <= y1 + 4 && py >= y1 - 26) return d.id;
           break;
+        case 'avwap': {
+          const pts = this.avwapPath(d);
+          for (let j = 1; j < pts.length; j++) if (segDist(px, py, pts[j - 1][0], pts[j - 1][1], pts[j][0], pts[j][1]) <= tol) return d.id;
+          break;
+        }
       }
     }
     return null;
@@ -161,6 +170,21 @@ export class DrawingsPrimitive extends BasePrimitive {
     const y2 = this.y(d.b.p);
     if (x1 === null || x2 === null || y1 === null || y2 === null) return null;
     return { x1, y1, x2, y2 };
+  }
+
+  /** Screen points of an anchored VWAP, from its anchor candle to the last candle. */
+  avwapPath(d: Drawing): [number, number][] {
+    const ks = this.candles;
+    if (!ks.length) return [];
+    const vals = anchoredVwap(ks, d.a.t);
+    const out: [number, number][] = [];
+    for (let i = 0; i < ks.length; i++) {
+      if (!Number.isFinite(vals[i])) continue;
+      const x = this.x(ks[i].t);
+      const y = this.y(vals[i]);
+      if (x !== null && y !== null) out.push([x, y]);
+    }
+    return out;
   }
 
   private path(d: Drawing): [number, number][] {
@@ -261,6 +285,23 @@ export class DrawingsPrimitive extends BasePrimitive {
           (d.text || '').split('\n').forEach((line, i) => ctx.fillText(line, x1 + TEXT_PAD, y1 + TEXT_PAD / 2 + 2 + i * LINE_H));
           ctx.textBaseline = 'alphabetic';
           handles = [[x1, y1]];
+        } else if (d.kind === 'avwap') {
+          const pts = this.avwapPath(d);
+          if (pts.length) {
+            ctx.lineWidth = sel ? 2.5 : 1.75;
+            ctx.beginPath();
+            ctx.moveTo(pts[0][0], pts[0][1]);
+            for (const [x, y] of pts.slice(1)) ctx.lineTo(x, y);
+            ctx.stroke();
+            const last = pts[pts.length - 1];
+            const v = (this.series?.coordinateToPrice(last[1]) as number | null | undefined) ?? null;
+            ctx.fillText(`AVWAP${v !== null ? ` ${v.toFixed(this.decimals)}` : ''}`, last[0] + 6, last[1] - 4);
+            // Anchor marker.
+            ctx.beginPath();
+            ctx.arc(pts[0][0], pts[0][1], 4, 0, Math.PI * 2);
+            ctx.fill();
+            handles = sel ? [pts[0]] : [];
+          } else handles = [];
         } else if (d.kind === 'arrowUp' || d.kind === 'arrowDown') {
           // The tip sits on the clicked price; the arrow points at it from below (up) or above (down).
           const s = d.kind === 'arrowUp' ? 1 : -1;

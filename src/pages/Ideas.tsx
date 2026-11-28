@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Market } from '../hl/api';
-import { getProfiles, listIdeas, postIdea, socialEnabled, type Idea, type Profile } from '../social/client';
+import { getProfiles, getScorecards, listIdeas, postIdea, socialEnabled, type Idea, type Profile, type Scorecard } from '../social/client';
 import { validateIdea } from '../../supabase/functions/_shared/proof';
 import { errorText, useWallet } from '../wallet/WalletContext';
 import { IdeaCard } from '../components/IdeaCard';
@@ -9,6 +9,7 @@ export function Ideas({ markets, coin, onRoute }: { markets: Market[]; coin: str
   const w = useWallet();
   const [ideas, setIdeas] = useState<Idea[] | null>(null);
   const [profiles, setProfiles] = useState<Map<string, Profile>>(new Map());
+  const [cards, setCards] = useState<Map<string, Scorecard>>(new Map());
   const [error, setError] = useState('');
   const [reload, setReload] = useState(0);
 
@@ -17,7 +18,9 @@ export function Ideas({ markets, coin, onRoute }: { markets: Market[]; coin: str
     listIdeas({ coin: coin ?? undefined })
       .then(async (list) => {
         setIdeas(list);
-        setProfiles(await getProfiles(list.map((i) => i.author)));
+        const authors = list.map((i) => i.author);
+        getScorecards(authors).then(setCards).catch(() => {});
+        setProfiles(await getProfiles(authors));
       })
       .catch((e) => setError(errorText(e)));
   }, [coin, reload]);
@@ -60,7 +63,7 @@ export function Ideas({ markets, coin, onRoute }: { markets: Market[]; coin: str
           ) : ideas.length === 0 ? (
             <div className="panel-empty">No ideas yet. Be the first.</div>
           ) : (
-            ideas.map((i) => <IdeaCard key={i.id} idea={i} profile={profiles.get(i.author)} market={byName.get(i.coin)} onRoute={onRoute} />)
+            ideas.map((i) => <IdeaCard key={i.id} idea={i} profile={profiles.get(i.author)} market={byName.get(i.coin)} scorecard={cards.get(i.author.toLowerCase())} onRoute={onRoute} />)
           )}
         </>
       )}

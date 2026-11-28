@@ -76,7 +76,8 @@ export function ChartTools({ indicators, onIndicators, tool, onTool, onClearDraw
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || e.metaKey || e.ctrlKey || e.altKey) return;
+      // Shift is left for the trading hotkeys.
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
       const k = (Object.keys(DRAWING_INFO) as DrawingKind[]).find((d) => DRAWING_INFO[d].key === e.key.toUpperCase());
       if (k) onTool(tool === k ? null : k);
     };
